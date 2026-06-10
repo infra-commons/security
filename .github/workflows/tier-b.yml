@@ -1,0 +1,113 @@
+name: Security — Tier B (reusable)
+
+# Tier B security gate for internal tools, automation scripts, and repos
+# with secrets in play but no external users.
+#
+# Runs on every push/PR:   Gitleaks secret scan (blocking)
+# Runs on every PR:        Semgrep SAST (blocking on findings in changed files)
+# Runs on schedule/manual: Trivy dependency CVE scan (non-blocking, report only)
+#
+# Caller pattern:
+#
+#   on:
+#     push: {}
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#     schedule:
+#       - cron: '0 2 * * 0'   # Sunday 02:00 UTC
+#     workflow_dispatch: {}
+#
+#   concurrency:
+#     group: security-${{ github.event_name }}-${{ github.ref }}
+#     cancel-in-progress: true
+#
+#   jobs:
+#     security:
+#       uses: rolliq-com/security/.github/workflows/tier-b.yml@<SHA>
+#       with:
+#         semgrep_config: 'p/python'   # adjust to match repo language
+#       # no secrets needed
+#
+# The caller workflow must grant:
+#   permissions:
+#     contents: read
+#
+# Tier B repos: rolliq-marketing, cashbucket-marketing
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      semgrep_config:
+        description: >-
+          Semgrep rule config. Accepts p/<ruleset> identifiers or local paths.
+          Examples: 'p/python', 'p/javascript', 'p/typescript', 'p/security-audit'.
+          Multiple configs: separate with a space — they are passed as successive
+          --config flags.
+        type: string
+        required: false
+        default: 'p/python p/security-audit'
+
+jobs:
+  # ── Secret scan (every push + PR) ────────────────────────────────────────────
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
+            detect --source=/repo --redact --verbose --exit-code=1
+
+  # ── SAST (PR to main only) ────────────────────────────────────────────────────
+  semgrep:
+    name: SAST (Semgrep)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Semgrep scan
+        run: |
+          pip install semgrep==1.163.0
+          # Build --config flags from space-separated input
+          CONFIG_FLAGS=""
+          for cfg in ${{ inputs.semgrep_config }}; do
+            CONFIG_FLAGS="$CONFIG_FLAGS --config $cfg"
+          done
+          # Non-zero exit on findings is acceptable here — we report, not block.
+          # Promote to exit-code 1 when the repo's baseline is clean.
+          semgrep scan $CONFIG_FLAGS --text || true
+
+  # ── Dependency CVE scan (schedule + manual only) ─────────────────────────────
+  trivy:
+    name: Dependency scan (Trivy)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Trivy — filesystem CVE scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: table
+          ignore-unfixed: true

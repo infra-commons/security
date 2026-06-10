@@ -1,0 +1,86 @@
+name: Daily health check (reusable)
+
+# Reusable daily health check for Rolliq solution repos.
+#
+# Caller pattern (trigger daily + workflow_dispatch):
+#
+#   on:
+#     schedule:
+#       - cron: '0 8 * * *'   # 08:00 UTC daily
+#     workflow_dispatch:
+#       inputs:
+#         dry_run:
+#           type: boolean
+#           default: false
+#
+#   concurrency:
+#     group: daily-health-check
+#     cancel-in-progress: false
+#
+#   jobs:
+#     health-check:
+#       uses: rolliq-com/security/.github/workflows/daily-health-check-reusable.yml@<SHA>
+#       with:
+#         dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# Required caller permissions:
+#   contents:      write   (squash-merge Dependabot PRs via auto-merge)
+#   pull-requests: write   (approve Dependabot PRs)
+#   actions:       write   (re-run failed workflows)
+#   issues:        write   (file / close health-check issues)
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      merge_dependabot:
+        description: >-
+          Auto-approve and enable auto-merge for minor/patch Dependabot PRs.
+          Set to false to disable (e.g. in repos with strict human-review policies).
+        type: boolean
+        required: false
+        default: true
+      lookback_hours:
+        description: >-
+          Hours of run history to scan for failures. Default 25 slightly exceeds
+          one day so a run that starts a few minutes late doesn't miss yesterday's failure.
+        type: number
+        required: false
+        default: 25
+      dry_run:
+        description: >-
+          Diagnose only — no re-runs, no issues filed, no PR approvals.
+          Useful for testing or manually inspecting what the agent would do.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false   # Falls back to pattern-only diagnosis without it
+
+jobs:
+  health-check:
+    name: Daily health check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents:      write
+      pull-requests: write
+      actions:       write
+      issues:        write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: rolliq-com/platform-iac/.github/actions/daily-health-check@1db4bd14a246ec813eb3a0a3130e8c7efe222e3d
+        with:
+          github-token:      ${{ github.token }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          repo:              ${{ github.repository }}
+          run-url:           ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          lookback-hours:    ${{ inputs.lookback_hours }}
+          merge-dependabot:  ${{ inputs.merge_dependabot }}
+          dry-run:           ${{ inputs.dry_run }}

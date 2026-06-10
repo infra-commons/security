@@ -1,0 +1,383 @@
+name: Weekly security scan (reusable)
+
+# Reusable weekly cadence security scan for Rolliq solution repos. Replaces the
+# duplicated security-scan.yml files that each solution repo previously maintained.
+#
+# Caller pattern (trigger on schedule and/or workflow_dispatch):
+#
+#   on:
+#     schedule:
+#       - cron: '0 2 * * 0'   # Sunday 02:00 UTC
+#     workflow_dispatch:
+#       inputs:
+#         run_ai_review:
+#           type: boolean
+#           default: false
+#
+#   concurrency:
+#     group: security-scan
+#     cancel-in-progress: false
+#
+#   jobs:
+#     weekly-scan:
+#       uses: rolliq-com/security/.github/workflows/weekly-security-scan-reusable.yml@<SHA>
+#       with:
+#         run_ai_review: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ai_review || false }}
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
+#         CLIENTS_CONFIG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+#
+# The caller workflow must grant:
+#   permissions:
+#     contents: read
+#     issues: write
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      run_ai_review:
+        description: >-
+          Also run the full-codebase adversarial AI review (deep audit — slow,
+          noisy on stable code). Opt-in; intended for manual workflow_dispatch.
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false   # not needed unless run_ai_review is true
+      PLATFORM_IAC_TOKEN:
+        required: false   # not needed unless run_ai_review is true (infra/cicd chunks)
+      CLIENTS_CONFIG_TOKEN:
+        required: false   # not needed unless run_ai_review is true or gitleaks runs
+
+jobs:
+  # ── 1a. Semgrep SAST ────────────────────────────────────────────────────────
+  semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    outputs:
+      findings_path: ${{ steps.scan.outputs.findings_path }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Semgrep scan (JSON output)
+        id: scan
+        run: |
+          pip install semgrep==1.163.0
+          OUTFILE="$RUNNER_TEMP/semgrep-findings.json"
+          # --json + || true: findings go to file; non-zero exit is expected on findings
+          semgrep scan \
+            --config p/python \
+            --config p/security-audit \
+            --config .semgrep/ \
+            --json \
+            --output "$OUTFILE" \
+            src/ || true
+          echo "findings_path=$OUTFILE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: semgrep-findings
+          path: ${{ steps.scan.outputs.findings_path }}
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 1b. Trivy SCA + container scan ─────────────────────────────────────────
+  trivy:
+    name: SCA + Container (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Trivy — filesystem scan (JSON)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: json
+          output: trivy-fs.json
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - name: Build image for scanning
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: security-scan-target:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy — image scan (JSON)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: security-scan-target:latest
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: json
+          output: trivy-image.json
+          ignore-unfixed: true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: trivy-findings
+          path: |
+            trivy-fs.json
+            trivy-image.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 1c. AI review — application layer (Claude) ─────────────────────────────
+  ai-review-app:
+    name: AI review — app layer (Claude)
+    # Opt-in only — manual dispatch with run_ai_review = true (deep audit).
+    if: ${{ inputs.run_ai_review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          mode: ai-review
+          scan-chunk: app
+          provider: anthropic
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          output-path: ${{ runner.temp }}/ai-findings-app.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: ai-findings-app
+          path: ${{ runner.temp }}/ai-findings-app.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 1d. AI review — infrastructure layer (Claude) ──────────────────────────
+  # Previously used GPT-4o, which hit its 30k TPM limit on the 136k-char infra
+  # dump. Switched to Claude, which has no such constraint at this scale.
+  ai-review-infra:
+    name: AI review — infra layer (Claude)
+    # Opt-in only — manual dispatch with run_ai_review = true (deep audit).
+    if: ${{ inputs.run_ai_review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check out platform-iac
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: rolliq-com/platform-iac
+          token: ${{ secrets.PLATFORM_IAC_TOKEN }}
+          path: _repos/platform-iac
+
+      - name: Check out clients-config
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: rolliq-com/clients-config
+          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          path: _repos/clients-config
+
+      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          mode: ai-review
+          scan-chunk: infra
+          provider: anthropic
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          output-path: ${{ runner.temp }}/ai-findings-infra.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: ai-findings-infra
+          path: ${{ runner.temp }}/ai-findings-infra.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 1e. AI review — CI/CD layer (Claude) ───────────────────────────────────
+  ai-review-cicd:
+    name: AI review — CI/CD layer (Claude)
+    # Opt-in only — manual dispatch with run_ai_review = true (deep audit).
+    if: ${{ inputs.run_ai_review }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check out platform-iac
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: rolliq-com/platform-iac
+          token: ${{ secrets.PLATFORM_IAC_TOKEN }}
+          path: _repos/platform-iac
+
+      - name: Check out clients-config
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: rolliq-com/clients-config
+          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          path: _repos/clients-config
+
+      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          mode: ai-review
+          scan-chunk: cicd
+          provider: anthropic
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          output-path: ${{ runner.temp }}/ai-findings-cicd.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: ai-findings-cicd
+          path: ${{ runner.temp }}/ai-findings-cicd.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 1f. Gitleaks secret scan — clients-config (full history) ───────────────
+  gitleaks:
+    name: Secret scan — clients-config (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out clients-config (full history)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: rolliq-com/clients-config
+          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          fetch-depth: 0
+          path: _repos/clients-config
+
+      - name: Gitleaks scan (JSON output)
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/_repos/clients-config:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
+            detect --source=/repo --redact \
+              --report-format json \
+              --report-path /repo/gitleaks-findings.json \
+              --exit-code 0
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: gitleaks-findings
+          path: _repos/clients-config/gitleaks-findings.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── 2. Create / close / update GitHub Issues ───────────────────────────────
+  create-issues:
+    name: Create/close GitHub Issues
+    needs: [semgrep, trivy, ai-review-app, ai-review-infra, ai-review-cicd, gitleaks]
+    # Run even if earlier jobs failed so partial results are always persisted.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Download all findings artifacts into named subdirectories.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: semgrep-findings
+          path: _artifacts/semgrep
+        continue-on-error: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: trivy-findings
+          path: _artifacts/trivy
+        continue-on-error: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-findings-app
+          path: _artifacts/ai-app
+        continue-on-error: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-findings-infra
+          path: _artifacts/ai-infra
+        continue-on-error: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-findings-cicd
+          path: _artifacts/ai-cicd
+        continue-on-error: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: gitleaks-findings
+          path: _artifacts/gitleaks
+        continue-on-error: true
+
+      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          mode: create-issues
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          semgrep-findings: _artifacts/semgrep/semgrep-findings.json
+          trivy-fs-findings: _artifacts/trivy/trivy-fs.json
+          trivy-image-findings: _artifacts/trivy/trivy-image.json
+          ai-app-findings: _artifacts/ai-app/ai-findings-app.json
+          ai-infra-findings: _artifacts/ai-infra/ai-findings-infra.json
+          ai-cicd-findings: _artifacts/ai-cicd/ai-findings-cicd.json
+          gitleaks-findings: _artifacts/gitleaks/gitleaks-findings.json
+
+  # ── 3. Suppression expiry audit ────────────────────────────────────────────
+  suppression-audit:
+    name: Suppression expiry audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: rolliq-com/platform-iac/.github/actions/suppression-audit@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

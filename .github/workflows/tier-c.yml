@@ -1,0 +1,46 @@
+name: Security — Tier C (reusable)
+
+# Tier C security gate for static sites, hobby projects, and repos with
+# no backend and no secrets in play. Runs a lightweight Gitleaks scan on
+# every push. Dependabot is configured separately in dependabot.yml.
+#
+# Caller pattern (push trigger):
+#
+#   on:
+#     push: {}
+#     workflow_dispatch: {}
+#
+#   jobs:
+#     security:
+#       uses: rolliq-com/security/.github/workflows/tier-c.yml@<SHA>
+#       # no secrets needed
+#
+# The caller workflow must grant:
+#   permissions:
+#     contents: read
+#
+# Tier C repos: rolliq-site, cashbucket-site, collective-expertise,
+#               workouts (until backend added), bpnz-newsletter, legal, operations
+
+permissions: {}
+
+on:
+  workflow_call:
+
+jobs:
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
+            detect --source=/repo --redact --verbose --exit-code=1

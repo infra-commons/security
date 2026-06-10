@@ -1,0 +1,144 @@
+name: Security — Tier A (reusable)
+
+# Tier A security gate for production repos, client-facing systems, and
+# any repo with Azure credentials or customer data in play.
+#
+# Runs on every push/PR:    Gitleaks secret scan (blocking)
+# Runs on every PR:         Semgrep SAST + adversarial AI review (blocking on CRITICAL)
+# Runs on schedule/manual:  Trivy CVE scan + optional full AI review
+#
+# The adversarial AI review is the heavyweight check — it blocks merge on
+# CRITICAL findings. Make the `adversarial-review / gate` check required
+# in branch protection settings.
+#
+# Caller pattern:
+#
+#   on:
+#     push: {}
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#     schedule:
+#       - cron: '0 2 * * 0'   # Sunday 02:00 UTC
+#     workflow_dispatch:
+#       inputs:
+#         run_ai_review:
+#           type: boolean
+#           default: false
+#
+#   concurrency:
+#     group: security-${{ github.event_name }}-${{ github.ref }}
+#     cancel-in-progress: true
+#
+#   jobs:
+#     security:
+#       uses: rolliq-com/security/.github/workflows/tier-a.yml@<SHA>
+#       with:
+#         semgrep_config: 'p/python'
+#         run_openai: false
+#       secrets: inherit   # passes ANTHROPIC_API_KEY (and OPENAI_API_KEY if run_openai: true)
+#
+# The caller workflow must grant:
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#
+# Tier A repos: platform-iac, solution-*, clients-config
+# Note: existing solution repos call the individual reusable workflows directly
+#       for finer-grained control. This entrypoint is for NEW Tier A repos.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      semgrep_config:
+        description: "Semgrep rule config (space-separated p/<ruleset> identifiers)"
+        type: string
+        required: false
+        default: 'p/python p/security-audit'
+      run_openai:
+        description: "Also run the OpenAI adversarial reviewer (needs OPENAI_API_KEY)"
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+
+jobs:
+  # ── Secret scan (every push + PR) ────────────────────────────────────────────
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
+            detect --source=/repo --redact --verbose --exit-code=1
+
+  # ── SAST (PR only) ────────────────────────────────────────────────────────────
+  semgrep:
+    name: SAST (Semgrep)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Semgrep scan
+        run: |
+          pip install semgrep==1.163.0
+          CONFIG_FLAGS=""
+          for cfg in ${{ inputs.semgrep_config }}; do
+            CONFIG_FLAGS="$CONFIG_FLAGS --config $cfg"
+          done
+          semgrep scan $CONFIG_FLAGS --text --error
+
+  # ── Adversarial AI review (PR only) ──────────────────────────────────────────
+  # Calls the reusable from this security repo. Make `adversarial-review / gate`
+  # a required check in branch protection.
+  # SHA-pinned even though it's same-repo: callers pin tier-a.yml to a SHA, but
+  # GitHub resolves chained `uses:` refs independently — @main would always pull
+  # the latest regardless of which SHA tier-a.yml was called at. Update this SHA
+  # alongside any breaking change to adversarial-review-reusable.yml.
+  adversarial-review:
+    if: github.event_name == 'pull_request'
+    uses: rolliq-com/security/.github/workflows/adversarial-review-reusable.yml@be6b1ec57a2e470d7f00ce58245c5039ac039091
+    with:
+      run-openai: ${{ inputs.run_openai }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+  # ── Dependency CVE scan (schedule + manual only) ─────────────────────────────
+  trivy:
+    name: Dependency scan (Trivy)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Trivy — filesystem CVE scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: table
+          ignore-unfixed: true

@@ -1,0 +1,156 @@
+name: Adversarial review (reusable)
+
+# Reusable adversarial AI security review, shared by every Rolliq repo.
+#
+# Caller pattern (the caller must trigger on `pull_request`):
+#   jobs:
+#     adversarial-review:
+#       uses: rolliq-com/security/.github/workflows/adversarial-review-reusable.yml@<SHA> # pin to immutable SHA
+#       secrets: inherit          # passes ANTHROPIC_API_KEY (and OPENAI_API_KEY)
+#       with:
+#         run-openai: true        # optional — second reviewer, default false
+#
+# The caller workflow must grant `contents: read` and `pull-requests: write`.
+# Resulting checks: `<caller-job-id> / claude`, `/ openai` (if enabled), `/ gate`.
+# Make `<caller-job-id> / gate` the required status check.
+
+# Default all permissions to none — each job declares exactly what it needs.
+# This prevents future jobs added without explicit permissions from inheriting
+# the caller's full token scope via secrets: inherit.
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      run-openai:
+        description: "Also run the OpenAI reviewer (needs OPENAI_API_KEY)."
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false   # not available in Dependabot/fork contexts; claude job skips itself
+      OPENAI_API_KEY:
+        required: false
+
+jobs:
+  # ── Claude reviewer ────────────────────────────────────────────────────────
+  claude:
+    name: claude
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Skip forks and Dependabot PRs — no secret access. The gate treats those
+    # skips as acceptable; a skip on a normal PR blocks merge.
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      has_critical: ${{ steps.review.outputs.has_critical }}
+    steps:
+      - id: review
+        uses: rolliq-com/platform-iac/.github/actions/adversarial-review@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          provider: anthropic
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          repo: ${{ github.repository }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+
+  # ── OpenAI reviewer (optional second perspective) ──────────────────────────
+  openai:
+    name: openai
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: >-
+      ${{ inputs.run-openai
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      has_critical: ${{ steps.review.outputs.has_critical }}
+    steps:
+      - id: review
+        uses: rolliq-com/platform-iac/.github/actions/adversarial-review@efc0e40f8fe58f4e39c158258926573690c93680
+        with:
+          provider: openai
+          api-key: ${{ secrets.OPENAI_API_KEY }}
+          github-token: ${{ github.token }}
+          pr-number: ${{ github.event.pull_request.number }}
+          repo: ${{ github.repository }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+
+  # ── Blocking gate ──────────────────────────────────────────────────────────
+  gate:
+    name: gate
+    runs-on: ubuntu-latest
+    needs: [claude, openai]
+    if: always()
+    steps:
+      - name: Evaluate findings
+        env:
+          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          CLAUDE_RESULT: ${{ needs.claude.result }}
+          OPENAI_RESULT: ${{ needs.openai.result }}
+          CLAUDE_HAS_CRITICAL: ${{ needs.claude.outputs.has_critical }}
+          OPENAI_HAS_CRITICAL: ${{ needs.openai.outputs.has_critical }}
+          RUN_OPENAI: ${{ inputs.run-openai }}
+        run: |
+          # Validate has_critical outputs — must be exactly "true", "false", or empty
+          # (empty when the reviewer job was skipped). Any other value means the review
+          # script wrote unexpected output; fail safe rather than trusting an unknown state.
+          for _var in CLAUDE_HAS_CRITICAL OPENAI_HAS_CRITICAL; do
+            _val="${!_var}"
+            if [ -n "$_val" ] && [ "$_val" != "true" ] && [ "$_val" != "false" ]; then
+              echo "::error::${_var} has unexpected value '${_val}' — must be 'true', 'false', or empty"
+              exit 1
+            fi
+          done
+
+          BLOCK=false
+          SKIP_OK=false
+          if [ "$IS_DEPENDABOT" = "true" ] || [ "$IS_FORK" = "true" ]; then SKIP_OK=true; fi
+
+          CLAUDE="$CLAUDE_RESULT"
+          OPENAI="$OPENAI_RESULT"
+
+          # Claude must run and pass on every normal PR.
+          if [ "$CLAUDE" = "skipped" ] && [ "$SKIP_OK" != "true" ]; then
+            echo "::error::Claude adversarial review was skipped on a normal PR — re-run the workflow."
+            BLOCK=true
+          fi
+          if [ "$CLAUDE" = "failure" ] || [ "$CLAUDE" = "cancelled" ]; then
+            echo "::error::Claude adversarial review did not complete ($CLAUDE) — check the job logs."
+            BLOCK=true
+          fi
+          if [ "$CLAUDE_HAS_CRITICAL" = "true" ]; then
+            echo "::error::CRITICAL findings from the Claude review — see the PR comment before merging."
+            BLOCK=true
+          fi
+
+          # OpenAI is only required when the caller opted in.
+          if [ "$RUN_OPENAI" = "true" ]; then
+            if [ "$OPENAI" = "skipped" ] && [ "$SKIP_OK" != "true" ]; then
+              echo "::error::OpenAI adversarial review was skipped on a normal PR — re-run the workflow."
+              BLOCK=true
+            fi
+            if [ "$OPENAI" = "failure" ] || [ "$OPENAI" = "cancelled" ]; then
+              echo "::error::OpenAI adversarial review did not complete ($OPENAI) — check the job logs."
+              BLOCK=true
+            fi
+            if [ "$OPENAI_HAS_CRITICAL" = "true" ]; then
+              echo "::error::CRITICAL findings from the OpenAI review — see the PR comment before merging."
+              BLOCK=true
+            fi
+          fi
+
+          if [ "$BLOCK" = "true" ]; then exit 1; fi
+          echo "No critical findings — adversarial review gate passed."
