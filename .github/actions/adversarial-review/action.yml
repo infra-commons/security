@@ -1,0 +1,61 @@
+name: Adversarial AI security review
+description: >-
+  Runs an adversarial AI security review of the current PR diff and posts the
+  findings as a PR comment. Provider-parameterised (Anthropic or OpenAI).
+
+inputs:
+  provider:
+    description: "LLM provider — anthropic | openai"
+    required: false
+    default: anthropic
+  api-key:
+    description: "API key for the chosen provider"
+    required: true
+  github-token:
+    description: "GitHub token with pull-requests:write"
+    required: true
+  pr-number:
+    description: "Pull request number"
+    required: true
+  repo:
+    description: "owner/repo slug"
+    required: true
+  base-sha:
+    description: "Base commit SHA of the PR"
+    required: true
+  head-sha:
+    description: "Head commit SHA of the PR"
+    required: true
+
+outputs:
+  has_critical:
+    description: "true if the review found CRITICAL findings"
+    value: ${{ steps.run.outputs.has_critical }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      with:
+        fetch-depth: 0
+
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install anthropic==0.49.0 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2
+
+    - name: Run adversarial security review
+      id: run
+      shell: bash
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        REVIEW_API_KEY: ${{ inputs.api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+        REPO: ${{ inputs.repo }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+      run: python "$GITHUB_ACTION_PATH/adversarial-review.py"
