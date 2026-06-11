@@ -51,7 +51,7 @@ jobs:
       has_critical: ${{ steps.review.outputs.has_critical }}
     steps:
       - id: review
-        uses: rolliq-com/platform-iac/.github/actions/adversarial-review@efc0e40f8fe58f4e39c158258926573690c93680
+        uses: infra-commons/security/.github/actions/adversarial-review@main
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -77,7 +77,7 @@ jobs:
       has_critical: ${{ steps.review.outputs.has_critical }}
     steps:
       - id: review
-        uses: rolliq-com/platform-iac/.github/actions/adversarial-review@efc0e40f8fe58f4e39c158258926573690c93680
+        uses: infra-commons/security/.github/actions/adversarial-review@main
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
