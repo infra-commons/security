@@ -1,0 +1,74 @@
+name: Daily health check
+description: >-
+  Triage Dependabot PRs (auto-approve + enable auto-merge for minor/patch bumps)
+  and failed scheduled/dispatch workflow runs (diagnose with Claude Haiku,
+  re-run if transient, file GitHub Issues for genuine failures).
+
+inputs:
+  github-token:
+    description: "GitHub token with pull-requests:write, actions:write, issues:write"
+    required: true
+  anthropic-api-key:
+    description: "Anthropic API key for Claude Haiku triage (optional — falls back to pattern matching)"
+    required: false
+    default: ""
+  repo:
+    description: "owner/repo slug"
+    required: true
+  run-url:
+    description: "URL of this health-check workflow run"
+    required: true
+  lookback-hours:
+    description: "Hours of run history to scan for failures (default: 25)"
+    required: false
+    default: "25"
+  merge-dependabot:
+    description: "Auto-approve and enable auto-merge for minor/patch Dependabot PRs"
+    required: false
+    default: "true"
+  dry-run:
+    description: "Diagnose only — no re-runs, no issues filed, no PR approvals"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install 'anthropic==0.49.0' --quiet
+
+    - name: Run health check
+      shell: bash
+      env:
+        GH_TOKEN:          ${{ inputs.github-token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        REPO:              ${{ inputs.repo }}
+        RUN_URL:           ${{ inputs.run-url }}
+        LOOKBACK_HOURS:    ${{ inputs.lookback-hours }}
+        MERGE_DEPENDABOT:  ${{ inputs.merge-dependabot }}
+        DRY_RUN:           ${{ inputs.dry-run }}
+      run: |
+        MERGE_FLAG=""
+        [ "$MERGE_DEPENDABOT" = "false" ] && MERGE_FLAG="--no-merge-dependabot"
+        DRY_RUN_FLAG=""
+        [ "$DRY_RUN" = "true" ] && DRY_RUN_FLAG="--dry-run"
+        python3 "$GITHUB_ACTION_PATH/health-check.py" \
+          --repo          "$REPO" \
+          --run-url       "$RUN_URL" \
+          --lookback-hours "$LOOKBACK_HOURS" \
+          $MERGE_FLAG \
+          $DRY_RUN_FLAG
+
+    - name: Upload results artifact
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: health-check-results
+        path: health-check-results.json
+        if-no-files-found: ignore
+        retention-days: 30
