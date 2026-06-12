@@ -159,7 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
           mode: ai-review
           scan-chunk: app
@@ -204,7 +204,7 @@ jobs:
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/clients-config
 
-      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
           mode: ai-review
           scan-chunk: infra
@@ -247,7 +247,7 @@ jobs:
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/clients-config
 
-      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
           mode: ai-review
           scan-chunk: cicd
@@ -350,7 +350,7 @@ jobs:
           path: _artifacts/gitleaks
         continue-on-error: true
 
-      - uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@efc0e40f8fe58f4e39c158258926573690c93680
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
           mode: create-issues
           github-token: ${{ github.token }}
@@ -376,7 +376,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: rolliq-com/platform-iac/.github/actions/suppression-audit@efc0e40f8fe58f4e39c158258926573690c93680
+      - uses: infra-commons/security/.github/actions/suppression-audit@main
         with:
           github-token: ${{ github.token }}
           repo: ${{ github.repository }}
