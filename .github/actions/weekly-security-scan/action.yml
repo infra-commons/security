@@ -1,0 +1,124 @@
+name: Weekly security scan
+description: >-
+  Runs one mode of the weekly cadence security scan — AI codebase review,
+  GitHub-issue creation/closing from cadence-scanner findings, or refresh of
+  the Security Status dashboard. Wraps the security-scan.py script that was
+  previously duplicated across every Rolliq solution repo.
+
+# The script supports three modes; per-mode inputs are documented below. Inputs
+# unused by a mode default to empty and are ignored. The script enforces what
+# is required per mode.
+
+inputs:
+  mode:
+    description: "ai-review | create-issues | update-dashboard"
+    required: true
+
+  # ── ai-review mode ──────────────────────────────────────────────────────────
+  scan-chunk:
+    description: "Chunk to review (ai-review only): app | infra | cicd"
+    required: false
+    default: ""
+  provider:
+    description: "LLM provider (ai-review only): anthropic | openai"
+    required: false
+    default: "anthropic"
+  api-key:
+    description: "LLM provider API key (ai-review only)"
+    required: false
+    default: ""
+  output-path:
+    description: "Path to write the JSON findings file (ai-review only)"
+    required: false
+    default: ""
+
+  # ── create-issues / update-dashboard modes ──────────────────────────────────
+  github-token:
+    description: "GitHub token with issues:write (create-issues / update-dashboard)"
+    required: false
+    default: ""
+  repo:
+    description: "owner/repo slug (create-issues / update-dashboard)"
+    required: false
+    default: ""
+  run-url:
+    description: "Workflow-run URL to include in created issues (create-issues / update-dashboard)"
+    required: false
+    default: ""
+
+  # ── create-issues mode — findings artifact paths ────────────────────────────
+  semgrep-findings:
+    description: "Path to Semgrep findings JSON"
+    required: false
+    default: ""
+  trivy-fs-findings:
+    description: "Path to Trivy filesystem-scan findings JSON"
+    required: false
+    default: ""
+  trivy-image-findings:
+    description: "Path to Trivy image-scan findings JSON"
+    required: false
+    default: ""
+  ai-app-findings:
+    description: "Path to ai-findings-app JSON"
+    required: false
+    default: ""
+  ai-infra-findings:
+    description: "Path to ai-findings-infra JSON"
+    required: false
+    default: ""
+  ai-cicd-findings:
+    description: "Path to ai-findings-cicd JSON"
+    required: false
+    default: ""
+  gitleaks-findings:
+    description: "Path to Gitleaks findings JSON"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    # ai-review needs anthropic/openai; create-issues / update-dashboard need
+    # only httpx + pyyaml. Install the superset once — keeps the action simple
+    # at the cost of ~30 s extra on the issue-management jobs.
+    - name: Install dependencies
+      shell: bash
+      run: pip install anthropic==0.49.0 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2
+
+    - name: Run security-scan.py
+      shell: bash
+      env:
+        # ai-review env
+        SCAN_CHUNK: ${{ inputs.scan-chunk }}
+        LLM_PROVIDER: ${{ inputs.provider }}
+        # security-scan.py reads ANTHROPIC_API_KEY when provider=anthropic and
+        # OPENAI_API_KEY when provider=openai. We forward the caller's single
+        # api-key input only to the env var matching the selected provider —
+        # the other is left empty. This is defence-in-depth: even if a future
+        # refactor or bug in security-scan.py reads the wrong provider's env
+        # var, an empty value cannot be POSTed to the wrong provider's API.
+        # Forwarding to both was the previous design but creates a credential-
+        # leak failure mode (an Anthropic key embedded in OPENAI_API_KEY could
+        # be sent to api.openai.com on the wrong code path).
+        ANTHROPIC_API_KEY: ${{ inputs.provider == 'anthropic' && inputs.api-key || '' }}
+        OPENAI_API_KEY: ${{ inputs.provider == 'openai' && inputs.api-key || '' }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+        # create-issues / update-dashboard env
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        RUN_URL: ${{ inputs.run-url }}
+        # create-issues — findings artifact paths
+        SEMGREP_FINDINGS: ${{ inputs.semgrep-findings }}
+        TRIVY_FS_FINDINGS: ${{ inputs.trivy-fs-findings }}
+        TRIVY_IMAGE_FINDINGS: ${{ inputs.trivy-image-findings }}
+        AI_APP_FINDINGS: ${{ inputs.ai-app-findings }}
+        AI_INFRA_FINDINGS: ${{ inputs.ai-infra-findings }}
+        AI_CICD_FINDINGS: ${{ inputs.ai-cicd-findings }}
+        GITLEAKS_FINDINGS: ${{ inputs.gitleaks-findings }}
+      run: python "$GITHUB_ACTION_PATH/security-scan.py" --mode "${{ inputs.mode }}"
