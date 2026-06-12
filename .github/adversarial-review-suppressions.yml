@@ -18,8 +18,8 @@ suppressions:
 
   # ── CI/CD supply-chain: SHA pins ─────────────────────────────────────────────
   - id: sha-pin-first-party-workflows
-    pattern: ".*\\.github/workflows/.*\\.ya?ml$"
-    finding: "(external org commit hash|unpinned.{0,30}commit|commit hash without code visibility|[Uu]npinned external.*reusable)"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    finding_pattern: "(external org commit hash|unpinned.{0,30}commit|commit hash without code visibility|[Uu]npinned external.*reusable)"
     reason: >
       Reusable workflows are intentionally pinned to immutable SHAs from first-party repos
       (infra-commons/security and each entity org's own security repo). The SHA is the
@@ -29,8 +29,8 @@ suppressions:
 
   # ── CI/CD supply-chain: security.yml push trigger ────────────────────────────
   - id: security-push-trigger-intentional
-    pattern: ".*\\.github/workflows/security\\.ya?ml$"
-    finding: "(push.*triggers.*all branch|push.*including forks|push: ?\\{\\})"
+    file_pattern: ".*\\.github/workflows/security\\.ya?ml$"
+    finding_pattern: "(push.*triggers.*all branch|push.*including forks|push: ?\\{\\})"
     reason: >
       The security.yml push: {} trigger runs security scans on all branch pushes by design
       for immediate feedback. All entity org repos are private with branch protection —
@@ -38,8 +38,8 @@ suppressions:
 
   # ── CI/CD permissions: issues:write on adversarial-review job ────────────────
   - id: issues-write-adversarial-review-intentional
-    pattern: ".*\\.github/workflows/.*\\.ya?ml$"
-    finding: "(issues.*write.*without.*justification|added.*issues.*write.*adversarial|issues.*write.*permission.*adversarial)"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    finding_pattern: "(issues.*write.*without.*justification|added.*issues.*write.*adversarial|issues.*write.*permission.*adversarial)"
     reason: >
       The adversarial-review job requires issues: write so the gate job can open a tracking
       issue when CRITICAL findings are found. This permission is documented in the reusable
