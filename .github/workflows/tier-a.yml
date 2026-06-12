@@ -115,7 +115,7 @@ jobs:
   # alongside any breaking change to adversarial-review-reusable.yml.
   adversarial-review:
     if: github.event_name == 'pull_request'
-    uses: rolliq-shared-infra/security/.github/workflows/adversarial-review-reusable.yml@af921a61af8783adf780265d727d7aca0b3325f6
+    uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@79a6885cc67dba7eb40d655de959e3a2eb9367f3
     with:
       run-openai: ${{ inputs.run_openai }}
     secrets:
