@@ -753,6 +753,45 @@ def post_comment(token: str, repo: str, pr_number: int, body: str) -> None:
         resp.raise_for_status()
 
 
+# ── Infra error handling ───────────────────────────────────────────────────────
+
+def _is_infra_error(provider: str, exc: Exception) -> bool:
+    """True if exc is a quota/rate-limit/transient API error — fail open, not a security finding."""
+    if provider == "anthropic":
+        import anthropic as _ant
+        if isinstance(exc, (_ant.RateLimitError, _ant.APIConnectionError, _ant.APITimeoutError)):
+            return True
+        if isinstance(exc, _ant.APIStatusError) and exc.status_code >= 500:
+            return True
+    elif provider == "openai":
+        import openai as _oai
+        if isinstance(exc, (_oai.RateLimitError, _oai.APIConnectionError, _oai.APITimeoutError)):
+            return True
+        if isinstance(exc, _oai.APIStatusError) and exc.status_code >= 500:
+            return True
+    return False
+
+
+def _post_infra_warning(token: str, repo: str, pr_number: int, label: str, marker: str, exc: Exception) -> None:
+    """Post a PR comment warning that the review was skipped due to an API infra error."""
+    body = (
+        f"{marker}\n"
+        f"## Adversarial AI Security Review — {label} (skipped: API error)\n\n"
+        f"> **Review could not complete** — the {label} API returned an infrastructure error.\n"
+        f"> The gate has passed to avoid blocking on operational failures, "
+        f"but **this PR has not been reviewed for security issues.**\n"
+        f"> Re-run the workflow once the API is available, or request a manual review.\n\n"
+        f"**Error:** `{str(exc)[:300]}`\n\n"
+        f"---\n"
+        f"*Posted by the adversarial-review workflow*"
+    )
+    try:
+        delete_previous_comments(token, repo, pr_number, marker)
+        post_comment(token, repo, pr_number, body)
+    except Exception as post_exc:
+        print(f"WARNING: failed to post infra warning comment: {post_exc}", file=sys.stderr)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -798,7 +837,15 @@ def main() -> None:
 
     context = get_repo_context()
     print(f"Running adversarial review (provider={provider}, model={model}, diff={len(diff)} chars) …")
-    review = run_review(provider, api_key, model, diff, context, system_prompt)
+    try:
+        review = run_review(provider, api_key, model, diff, context, system_prompt)
+    except Exception as exc:
+        if _is_infra_error(provider, exc):
+            print(f"WARNING: API infrastructure error — failing open: {exc}", file=sys.stderr)
+            _post_infra_warning(token, repo, pr_number, label, marker, exc)
+            set_github_output("has_critical", "false")
+            return
+        raise
 
     filtered_review, suppressed = apply_suppressions(review, suppressions)
     if suppressed:
