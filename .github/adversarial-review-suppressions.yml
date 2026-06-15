@@ -44,3 +44,61 @@ suppressions:
       The adversarial-review job requires issues: write so the gate job can open a tracking
       issue when CRITICAL findings are found. This permission is documented in the reusable
       workflow caller pattern and is the minimum required scope.
+
+  # ── Supply-chain: first-party reusable workflow trust boundary ───────────────
+  - id: first-party-reusable-workflow-trust
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    finding_pattern: "(reusable workflow.{0,80}(external|third-party|separate org|untrusted|potentially untrusted)|(external|separate) (org|repo).{0,40}(supply.?chain|trust boundary|ownership)|org/repo trust not verifiable|without verified ownership)"
+    reason: >
+      All reusable workflows are SHA-pinned to first-party repos: infra-commons/{security,legal}
+      (public, org-owned) and each entity org's own security repo (private, org-owned). There is
+      no untrusted third-party org in this architecture; the "external org" framing is a false
+      positive. The SHA pin is the supply-chain control. Permanent architectural decision.
+
+  # ── Supply-chain: ANTHROPIC_API_KEY to first-party AI-review reusables ────────
+  - id: anthropic-key-to-first-party-reusable
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    finding_pattern: "ANTHROPIC_API_KEY.{0,60}(passed|secret|to).{0,40}(reusable workflow|external|third-party|infra-commons)"
+    reason: >
+      ANTHROPIC_API_KEY is intentionally passed to first-party infra-commons/{security,legal}
+      reusable workflows that run our adversarial-review and legal-review AI checks. This is a
+      documented, first-party data flow — not exfiltration to an external party. The Anthropic
+      sub-processor relationship is covered by the sub-processor register / DPA. Permanent.
+
+  # ── Static caller inputs to first-party legal reusables (jurisdictions/max_files)
+  - id: static-input-to-first-party-legal-reusable
+    file_pattern: ".*\\.github/workflows/legal-codebase-(audit|scan)\\.ya?ml$"
+    finding_pattern: "(user-controlled|unsanitised|unsanitized).{0,60}(input|jurisdictions|max_files).{0,40}(external|reusable workflow)"
+    reason: >
+      jurisdictions and max_files are static, caller-authored literals committed in first-party
+      workflow files — not attacker-controlled runtime input. They are passed to first-party
+      reusables. No injection surface exists. False positive for this architecture.
+
+  # ── issues:write on first-party legal-codebase-audit reusable ────────────────
+  - id: issues-write-legal-codebase-audit-intentional
+    file_pattern: ".*\\.github/workflows/legal-codebase-audit\\.ya?ml$"
+    finding_pattern: "issues.{0,20}write.{0,60}(external|externally-controlled).{0,20}reusable workflow"
+    reason: >
+      legal-codebase-audit grants issues: write so the first-party reusable can file tracked
+      legal findings as issues. Minimum required scope; the reusable is first-party. Intentional.
+
+  # ── Suppression governance (self-authored suppression findings) ──────────────
+  - id: suppression-file-governed-by-audit
+    file_pattern: ".*adversarial-review-suppressions\\.ya?ml$"
+    finding_pattern: "(self-authored suppression|suppression (bypasses|masks|removes)|AI agent.{0,40}suppress)"
+    reason: >
+      Suppressions are governed, not unchecked: canonical entries require an infra-commons/security
+      PR (human review), the suppression-audit action audits every entry on each run, and
+      canonical-wins-on-id prevents a downstream repo silently neutering a platform suppression.
+      The secret flows referenced go to first-party infra-commons reusables (see
+      anthropic-key-to-first-party-reusable), not external exfiltration. Human-oversight gate is
+      the PR + suppression-audit, not removed.
+
+  # ── First-party reusable SHA bumps are reviewed upgrades, not drift ──────────
+  - id: first-party-reusable-sha-bump
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    finding_pattern: "(SHA bump|SHA changed|unverified sha).{0,60}(reusable|third-party|action|without documented review)"
+    reason: >
+      A reusable-workflow/action SHA bump is an intentional, PR-reviewed upgrade of a first-party
+      pin (infra-commons or the org's own repo). Pin-to-SHA is the supply-chain control; bumping
+      the pin is the supported upgrade path, reviewed via the bumping PR. False positive.
