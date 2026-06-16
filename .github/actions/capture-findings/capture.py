@@ -443,6 +443,7 @@ _LABELS = [
     {"name": "severity:medium",       "color": "f9d0c4", "description": "Fix within 90 days"},
     {"name": "severity:low",          "color": "e0e0e0", "description": "Best-practice improvement"},
     {"name": "source:adversarial-ai", "color": "7057ff", "description": "Adversarial AI review finding"},
+    {"name": "wont-fix",              "color": "cccccc", "description": "Suppressed — accepted risk or false positive; will not be re-filed"},
 ]
 
 
@@ -474,6 +475,36 @@ def open_issue_titles(token: str, repo: str) -> set[str]:
                 break
             page += 1
     return titles
+
+
+def closed_wontfix_keys(token: str, repo: str) -> set[str]:
+    """Return title strings and location keys for closed wont-fix security issues.
+
+    Closing a security finding with the wont-fix label is a durable suppression:
+    the finding will not be re-filed on subsequent merges, at parity with how
+    the legal capture handles suppressed_issue_keys.
+    """
+    keys: set[str] = set()
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        page = 1
+        while True:
+            resp = client.get(
+                f"{GITHUB_API}/repos/{repo}/issues",
+                headers=_headers(token),
+                params={"labels": "wont-fix", "state": "closed", "per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            for issue in batch:
+                title = issue["title"]
+                keys.add(title)
+                loc = _location_key(title)
+                if loc:
+                    keys.add(loc)
+            if len(batch) < 100:
+                break
+            page += 1
+    return keys
 
 
 # Regex to extract the fixed prefix "[Security][adversarial-ai][SEV] location" from
@@ -588,6 +619,9 @@ def main() -> None:
         k for t in existing if (k := _location_key(t))
     }
 
+    wontfix = closed_wontfix_keys(token, repo)
+    print(f"  {len(wontfix)} closed wont-fix key(s) — these will not be re-filed")
+
     _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 
     created = 0
@@ -598,6 +632,9 @@ def main() -> None:
         sev = raw_sev if raw_sev in _VALID_SEVERITIES else "LOW"
         title = issue_title(finding)
         loc_key = _location_key(title)
+        if title in wontfix or (loc_key and loc_key in wontfix):
+            print(f"  Suppressed (wont-fix closed): {title[:80]}")
+            continue
         if title in existing or (loc_key and loc_key in existing_location_keys):
             print(f"  Already tracked: {title[:80]}")
             if sev == "CRITICAL":
