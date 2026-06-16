@@ -51,7 +51,7 @@ jobs:
       has_critical: ${{ steps.review.outputs.has_critical }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@main
+        uses: infra-commons/security/.github/actions/adversarial-review@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -77,7 +77,7 @@ jobs:
       has_critical: ${{ steps.review.outputs.has_critical }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@main
+        uses: infra-commons/security/.github/actions/adversarial-review@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
