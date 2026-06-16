@@ -1,6 +1,6 @@
 name: Weekly security scan (reusable)
 
-# Reusable weekly cadence security scan for Rolliq solution repos. Replaces the
+# Reusable weekly cadence security scan for solution repos. Replaces the
 # duplicated security-scan.yml files that each solution repo previously maintained.
 #
 # Caller pattern (trigger on schedule and/or workflow_dispatch):
@@ -20,9 +20,11 @@ name: Weekly security scan (reusable)
 #
 #   jobs:
 #     weekly-scan:
-#       uses: rolliq-shared-infra/security/.github/workflows/weekly-security-scan-reusable.yml@<SHA>
+#       uses: infra-commons/security/.github/workflows/weekly-security-scan-reusable.yml@<SHA>
 #       with:
 #         run_ai_review: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ai_review || false }}
+#         infra_repo: org/infra-repo          # private infra repo for AI infra/cicd review
+#         secrets_repo: org/secrets-repo      # private config/PII repo for Gitleaks + AI review
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
@@ -45,13 +47,27 @@ on:
         type: boolean
         required: false
         default: false
+      infra_repo:
+        description: >-
+          Private infrastructure repo (org/name) checked out under _repos/infra
+          for AI infra and CI/CD review chunks. Leave empty to skip those checkouts.
+        type: string
+        required: false
+        default: ""
+      secrets_repo:
+        description: >-
+          Private config/PII repo (org/name) checked out under _repos/secrets for
+          Gitleaks full-history scan and AI infra/cicd review. Leave empty to skip.
+        type: string
+        required: false
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: false   # not needed unless run_ai_review is true
       PLATFORM_IAC_TOKEN:
-        required: false   # not needed unless run_ai_review is true (infra/cicd chunks)
+        required: false   # not needed unless infra_repo is set
       CLIENTS_CONFIG_TOKEN:
-        required: false   # not needed unless run_ai_review is true or gitleaks runs
+        required: false   # not needed unless secrets_repo is set
 
 jobs:
   # ── 1a. Semgrep SAST ────────────────────────────────────────────────────────
@@ -190,19 +206,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Check out platform-iac
+      - name: Check out infra repo
+        if: ${{ inputs.infra_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: rolliq-com/platform-iac
+          repository: ${{ inputs.infra_repo }}
           token: ${{ secrets.PLATFORM_IAC_TOKEN }}
-          path: _repos/platform-iac
+          path: _repos/infra
 
-      - name: Check out clients-config
+      - name: Check out config repo
+        if: ${{ inputs.secrets_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: rolliq-com/clients-config
+          repository: ${{ inputs.secrets_repo }}
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
-          path: _repos/clients-config
+          path: _repos/secrets
 
       - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
@@ -233,19 +251,21 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Check out platform-iac
+      - name: Check out infra repo
+        if: ${{ inputs.infra_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: rolliq-com/platform-iac
+          repository: ${{ inputs.infra_repo }}
           token: ${{ secrets.PLATFORM_IAC_TOKEN }}
-          path: _repos/platform-iac
+          path: _repos/infra
 
-      - name: Check out clients-config
+      - name: Check out config repo
+        if: ${{ inputs.secrets_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: rolliq-com/clients-config
+          repository: ${{ inputs.secrets_repo }}
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
-          path: _repos/clients-config
+          path: _repos/secrets
 
       - uses: infra-commons/security/.github/actions/weekly-security-scan@main
         with:
@@ -263,27 +283,28 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-  # ── 1f. Gitleaks secret scan — clients-config (full history) ───────────────
+  # ── 1f. Gitleaks secret scan — config repo (full history) ──────────────────
   gitleaks:
-    name: Secret scan — clients-config (Gitleaks)
+    name: Secret scan — config repo (Gitleaks)
+    if: ${{ inputs.secrets_repo != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
 
     steps:
-      - name: Check out clients-config (full history)
+      - name: Check out config repo (full history)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: rolliq-com/clients-config
+          repository: ${{ inputs.secrets_repo }}
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
           fetch-depth: 0
-          path: _repos/clients-config
+          path: _repos/secrets
 
       - name: Gitleaks scan (JSON output)
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}/_repos/clients-config:/repo" \
+            -v "${{ github.workspace }}/_repos/secrets:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
             detect --source=/repo --redact \
               --report-format json \
@@ -294,7 +315,7 @@ jobs:
         if: always()
         with:
           name: gitleaks-findings
-          path: _repos/clients-config/gitleaks-findings.json
+          path: _repos/secrets/gitleaks-findings.json
           if-no-files-found: ignore
           retention-days: 30
 
