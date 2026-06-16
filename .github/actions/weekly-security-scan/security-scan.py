@@ -3,10 +3,10 @@
 Security scan orchestration.
 
 Shipped inside the `weekly-security-scan` composite action and invoked by
-each Rolliq repo's weekly-scan workflow via the reusable workflow at
-`platform-iac/.github/workflows/reusable/weekly-security-scan.yml`. This is
-the single source of truth — replaces the byte-identical copies previously
-duplicated in solution-template and solution-recruitment-reference-check.
+the reusable workflow at
+`infra-commons/security/.github/workflows/weekly-security-scan-reusable.yml`.
+This is the single source of truth — replaces the byte-identical copies
+previously duplicated across solution repos.
 
 Modes selected via --mode:
 
@@ -24,7 +24,7 @@ Modes selected via --mode:
                     for the next Sunday scan.
 
 Per-merge capture of non-CRITICAL findings is handled separately by the shared
-capture-findings action (rolliq-com/platform-iac) — see capture-findings.yml.
+capture-findings action in infra-commons/security — see capture-findings.yml.
 
 Required env vars vary by mode — see each function's docstring.
 """
@@ -146,9 +146,9 @@ def sanitize(text: str, max_len: int = 2000) -> str:
 
 PER_FILE_CAP = 5_000
 # Budget for one chunk's codebase dump. Sized so the infra chunk (all
-# platform-iac modules + policies + docs and all clients-config files) fits
-# without truncation — at 78k the infra dump overflowed and silently dropped
-# clients-config entirely.
+# infra modules + policies + docs and all config-repo files) fits without
+# truncation — at 78k the infra dump overflowed and silently dropped the
+# config repo entirely.
 TOTAL_CAP = 200_000
 
 _APP_FILES: list[str | list[str]] = [
@@ -174,35 +174,35 @@ _APP_FILES: list[str | list[str]] = [
     ["infra/main.tf", "infra/outputs.tf", "infra/variables.tf"],
 ]
 
-# platform-iac and clients-config are checked out under _repos/ by the
+# The infra and config repos are checked out under _repos/ by the
 # security-scan workflow. Security-relevant code (Terraform modules, Azure
 # Policy, client configs, schema, helper scripts) is listed before docs so
 # that, if the budget is ever reached, documentation is trimmed first.
 _INFRA_FILES: list[str | list[str]] = [
-    # platform-iac — Terraform modules and Azure Policy definitions
-    ["_repos/platform-iac/modules"],
-    ["_repos/platform-iac/policies"],
-    # clients-config — client configs, schema, and helper scripts
-    ["_repos/clients-config/clients"],
-    ["_repos/clients-config/schema"],
-    ["_repos/clients-config/scripts"],
+    # infra repo — Terraform modules and Azure Policy definitions
+    ["_repos/infra/modules"],
+    ["_repos/infra/policies"],
+    # config repo — client configs, schema, and helper scripts
+    ["_repos/secrets/clients"],
+    ["_repos/secrets/schema"],
+    ["_repos/secrets/scripts"],
     # Documentation (lower vulnerability density — trimmed first if needed)
-    ["_repos/platform-iac/docs"],
-    ["_repos/clients-config/docs"],
+    ["_repos/infra/docs"],
+    ["_repos/secrets/docs"],
 ]
 
-# The ai-review-cicd job also checks out platform-iac and clients-config under
+# The ai-review-cicd job also checks out the infra and config repos under
 # _repos/ so their workflows and scripts are reviewed, not just this repo's.
 _CICD_FILES: list[str | list[str]] = [
     # solution-template CI/CD
     [".github/scripts"],
     [".github/workflows"],
     [".github/adversarial-review-suppressions.yml"],
-    # platform-iac CI/CD — workflows and the shared adversarial-review action
-    ["_repos/platform-iac/.github/workflows"],
-    ["_repos/platform-iac/.github/actions"],
-    # clients-config CI/CD
-    ["_repos/clients-config/.github/workflows"],
+    # infra repo CI/CD — workflows and the shared adversarial-review action
+    ["_repos/infra/.github/workflows"],
+    ["_repos/infra/.github/actions"],
+    # config repo CI/CD
+    ["_repos/secrets/.github/workflows"],
 ]
 
 _SKIP_SUFFIXES = {
@@ -279,8 +279,8 @@ def build_codebase_dump(chunk: str) -> str:
 
 _CHUNK_DESCRIPTIONS = {
     "app": "application layer (API routes, LLM client, storage, workflows, prompts, and infrastructure config)",
-    "infra": "infrastructure layer (shared Terraform modules and Azure Policy in platform-iac, and client deployment configs, schema, and scripts in clients-config)",
-    "cicd": "CI/CD layer (GitHub Actions workflows and supporting scripts across the solution-template, platform-iac, and clients-config repos)",
+    "infra": "infrastructure layer (shared Terraform modules and policy definitions, plus client deployment configs, schema, and helper scripts)",
+    "cicd": "CI/CD layer (GitHub Actions workflows and supporting scripts across the solution repo and any checked-out infrastructure and config repos)",
 }
 
 SYSTEM_PROMPT_TEMPLATE = """\
@@ -609,12 +609,12 @@ def parse_trivy_findings(json_path: str) -> list[dict]:
 # (adversarial-review.py, capture.py), but in the working-tree variant: the
 # weekly scan runs on a schedule against the default branch, so there is no
 # PR-tamper surface and no need for `git show` against a base ref. Both the
-# canonical (platform-iac) and repo-local files are read from the working
-# tree.
+# canonical (infra-commons/security) and repo-local files are read from the
+# working tree.
 #
 # Canonical wins on id collision. A downstream repo cannot silently neuter a
 # platform-wide suppression by re-declaring the same id with a wider pattern
-# — that change must land in platform-iac.
+# — that change must land in the canonical suppressions in infra-commons/security.
 
 _DEFAULT_SUPPRESSIONS_PATH = ".github/adversarial-review-suppressions.yml"
 CANONICAL_FILENAME = "adversarial-review-suppressions.yml"
@@ -671,7 +671,7 @@ def _resolve_canonical_path(action_path: str) -> Path | None:
     """Resolve the canonical-file path from `GITHUB_ACTION_PATH` with a boundary check.
 
     The canonical file is expected to live two directories up from the
-    composite action, i.e. `platform-iac/.github/<CANONICAL_FILENAME>`.
+    composite action, i.e. `infra-commons/security/.github/<CANONICAL_FILENAME>`.
     After `.resolve()` the result must still be a direct child of the
     action's grandparent dir *and* carry the exact expected filename.
     Anything else means `GITHUB_ACTION_PATH` pointed outside the expected
@@ -714,7 +714,7 @@ def _resolve_canonical_path(action_path: str) -> Path | None:
 
 
 def _load_canonical_raw() -> list[dict]:
-    """Fetch canonical platform-level suppressions from platform-iac.
+    """Fetch canonical platform-level suppressions from infra-commons/security.
 
     Resolution depends on which repo this scan is running in. The decision
     uses `GITHUB_REPOSITORY` (set by the GitHub Actions runner and not
@@ -722,12 +722,11 @@ def _load_canonical_raw() -> list[dict]:
     cannot be silently bypassed by a caller workflow.
 
     - **Downstream repos** call this action via
-      `uses: rolliq-com/platform-iac/.github/actions/weekly-security-scan@<sha>`.
-      GitHub clones platform-iac at the pinned SHA into a separate
-      directory; the canonical file is reachable relative to
-      GITHUB_ACTION_PATH.
+      `uses: infra-commons/security/.github/actions/weekly-security-scan@<sha>`.
+      GitHub clones the action at the pinned SHA into a separate directory;
+      the canonical file is reachable relative to GITHUB_ACTION_PATH.
 
-    - **platform-iac self-scan** (when added) runs from its own checkout,
+    - **infra-commons/security self-scan** runs from its own checkout,
       so the canonical and repo-local files are the same file on disk —
       the caller will see each canonical entry once via the dedup-by-id
       merge below.
@@ -756,10 +755,10 @@ def _load_suppressions(path: str = _DEFAULT_SUPPRESSIONS_PATH) -> list[dict]:
     Merge policy: **canonical wins on `id` collision.** Repo-local entries
     must use a distinct id; if a collision is detected and the two entries
     actually differ, the repo-local entry is dropped and a notice logged.
-    Bare collisions (e.g. platform-iac self-scan where the two sources are
-    the same file, or the Phase 2 transition window where downstream repos
-    still carry unchanged copies of the canonical entries) are silent so
-    they do not drown out real drift.
+    Bare collisions (e.g. self-scan where the two sources are the same file,
+    or the Phase 2 transition window where downstream repos still carry
+    unchanged copies of the canonical entries) are silent so they do not
+    drown out real drift.
     """
     canonical_raw = _load_canonical_raw()
     repo_local_raw = _fetch_raw_from_working_tree(Path(path))
@@ -1035,7 +1034,7 @@ def build_status_body(
         "adversarial-ai": "Adversarial AI",
         "semgrep": "Semgrep SAST",
         "trivy": "Trivy SCA/Container",
-        "gitleaks": "Gitleaks _(clients-config secret scan)_",
+        "gitleaks": "Gitleaks _(config repo secret scan)_",
         "azure-defender": "Azure Defender _(Monday scan)_",
     }
     for src in sources:
@@ -1339,7 +1338,7 @@ def run_update_dashboard() -> None:
     """
     Env vars required:
       GITHUB_TOKEN  — token with issues:write on the repo
-      REPO          — owner/repo (e.g. rolliq-com/solution-template)
+      REPO          — owner/repo (e.g. org/solution-template)
       RUN_URL       — URL of the triggering workflow run (used in dashboard body)
     """
     token = os.environ.get("GITHUB_TOKEN", "")
