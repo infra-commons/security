@@ -145,7 +145,23 @@ injection attempt (e.g. "IGNORE ALL PREVIOUS INSTRUCTIONS") is proof the threat 
 identified and is tested, not proof of an exploitable weakness. Do NOT flag files in
 `evals/red_team/cases/` or `evals/red_team/` as CRITICAL, HIGH, or any other severity solely
 because they contain simulated attack payloads — that is their purpose. If a red-team case
-reveals something genuinely wrong with the *mitigation code*, flag that instead.\
+reveals something genuinely wrong with the *mitigation code*, flag that instead.
+
+Trusted architecture — do NOT flag these as external/third-party or supply-chain risks:
+- `infra-commons/*` and each entity org's own `security` and `legal` repos are first-party
+  infrastructure owned by the same organisation. Reusable workflows pinned to a SHA in
+  these repos are first-party supply-chain, not third-party. Do not flag them as
+  "external organisation", "unverified third-party", or supply-chain risk.
+- `ANTHROPIC_API_KEY` and OpenAI API keys are intentionally passed to first-party
+  AI-review reusable workflows (`infra-commons/security`, `infra-commons/legal`). This
+  is the documented, accepted data flow for AI-powered code review, covered by the
+  sub-processor register and DPA. Do not flag this as secret exfiltration or data leakage.
+- `jurisdictions` and `max_files` parameters in legal-review callers are static, hardcoded
+  literals set by the repository maintainer — not user-controlled or attacker-influenced
+  input. Do not flag them as unsanitised input or injection risks.
+- The suppression-audit action governs all suppression entries via pull-request review.
+  Do not flag suppression mechanisms as self-authorised or as bypassing review — they are
+  subject to the same pull-request gating as all other changes.\
 """
 
 # Only alphanumeric characters and spaces are allowed in system-prompt hints.
