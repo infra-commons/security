@@ -75,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: infra-commons/security/.github/actions/daily-health-check@main
+      - uses: infra-commons/security/.github/actions/daily-health-check@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
         with:
           github-token:      ${{ github.token }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
