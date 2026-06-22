@@ -71,6 +71,22 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
 | `tier-a.yml` / `tier-b.yml` / `tier-c.yml` | Tiered security posture bundles |
 
+## `pentest/` — internal penetration-test toolkit
+
+A standalone, locally-runnable toolkit (not a workflow) that actively probes a
+running solution API (auth/HMAC bypass, IDOR, rate-limit evasion, payload limits,
+prompt injection, info disclosure) and statically scans IaC / client config. It
+fills the gap the weekly Nuclei DAST deliberately leaves (active testing) and emits
+findings in the standard `security` + `severity:*` + `source:pentest` model.
+
+It is shared here because the controls it verifies come from the shared
+solution-template middleware and platform-iac modules; it is **config-driven** via a
+per-solution `pentest-profile.yml` (see `pentest/config.example.yml`), so the engine
+stays generic. See `pentest/README.md` for usage and the non-negotiable safety rules
+(target allowlist, non-destructive, rate-limited, dry-by-default). Entity `security`
+repos stay code-free and consume it via the `pentest-scan-reusable.yml` workflow
+(to be added) at a pinned SHA.
+
 ## Usage pattern
 
 Entity org security repos call these reusable workflows via SHA-pinned refs:
