@@ -1,0 +1,6 @@
+infra-commons
+Copyright 2026 infra-commons maintainers
+
+This product includes generic, reusable infrastructure (CI/CD workflows, deploy
+and security templates, and automation runtime) shared as open source under the
+Apache License, Version 2.0.
