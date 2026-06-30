@@ -59,7 +59,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install anthropic==0.49.0 httpx==0.28.1
+        run: pip install anthropic==0.49.0 httpx==0.28.1 pyyaml==6.0.2
 
       - name: Capture legal findings from the merged diff
         env:
@@ -104,8 +104,13 @@ jobs:
 
           import anthropic
           import httpx
+          import yaml
 
           GITHUB_API = "https://api.github.com"
+          LEGAL_SUPPRESSIONS_URL = (
+              "https://raw.githubusercontent.com/infra-commons/security/main"
+              "/.github/legal-review-suppressions.yml"
+          )
           MAX_DIFF_CHARS = 60_000
           MODEL = "claude-sonnet-4-6"
           ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
@@ -395,6 +400,44 @@ jobs:
               return m.group(1) if m else None
 
 
+          def load_legal_suppressions() -> list[dict]:
+              """Download and parse the canonical legal-review suppression config.
+
+              Fetches .github/legal-review-suppressions.yml from the public
+              infra-commons/security repo. Returns an empty list on any failure so
+              the workflow continues without suppression rather than hard-failing.
+              """
+              try:
+                  resp = httpx.get(LEGAL_SUPPRESSIONS_URL, timeout=10.0, follow_redirects=True)
+                  resp.raise_for_status()
+                  data = yaml.safe_load(resp.text)
+                  entries = (data or {}).get("suppressions", []) if isinstance(data, dict) else []
+                  valid = [e for e in entries if isinstance(e, dict) and e.get("id")]
+                  print(f"  Loaded {len(valid)} canonical legal suppression(s)")
+                  return valid
+              except Exception as exc:
+                  print(f"Warning: could not load canonical legal suppressions: {exc}", file=sys.stderr)
+                  return []
+
+
+          def is_legal_suppressed(finding: dict, suppressions: list[dict]) -> tuple[bool, str | None]:
+              """Return (True, rule_id) if this finding matches a suppression rule."""
+              loc = finding.get("location", "")
+              text = finding.get("title", "") + " " + finding.get("description", "")
+              for sup in suppressions:
+                  fp = sup.get("file_pattern")
+                  pp = sup.get("finding_pattern")
+                  try:
+                      if fp and not re.search(fp, loc, re.IGNORECASE):
+                          continue
+                      if pp and not re.search(pp, text, re.IGNORECASE):
+                          continue
+                  except re.error:
+                      continue
+                  return True, sup.get("id")
+              return False, None
+
+
           def create_issue(token: str, repo: str, title: str, body: str, labels: list[str]) -> None:
               with httpx.Client(timeout=_TIMEOUT) as client:
                   client.post(
@@ -484,6 +527,8 @@ jobs:
               suppressed = suppressed_issue_keys(token, repo)
               print(f"  {len(suppressed)} suppressed key(s) (wont-fix) — these will never be re-filed")
 
+              legal_suppressions = load_legal_suppressions()
+
               _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 
               created = 0
@@ -497,6 +542,10 @@ jobs:
                   is_suppressed = title in suppressed or (loc_key and loc_key in suppressed)
                   if is_suppressed:
                       print(f"  Suppressed (wont-fix): {title[:80]}")
+                      continue
+                  suppressed_by_rule, rule_id = is_legal_suppressed(finding, legal_suppressions)
+                  if suppressed_by_rule:
+                      print(f"  Suppressed by rule {rule_id!r}: {title[:80]}")
                       continue
                   if title in existing or (loc_key and loc_key in existing_location_keys):
                       print(f"  Already tracked: {title[:80]}")
