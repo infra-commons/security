@@ -1,0 +1,81 @@
+# Canonical platform-wide suppressions for legal-capture-findings.
+# Applied automatically to every entity org repo that calls the reusable workflow
+# from infra-commons/security — no per-repo changes needed.
+#
+# Privacy rule: this file is in a PUBLIC repo. It MUST NOT contain any private repo
+# context (internal paths, names, emails, org-specific details). Those belong in each
+# private repo's own .github/legal-review-suppressions.yml (merged by the workflow).
+#
+# Suppression gates ISSUE FILING only — findings still appear in the run log.
+# A suppressed finding is never re-filed; it remains visible for audit in the CI logs.
+#
+# Format:
+#   - id: kebab-slug          # unique; identifies the class in run logs
+#     file_pattern: "regex"   # matched against the finding's location field (case-insensitive)
+#     finding_pattern: "regex" # matched against the finding title + description (case-insensitive)
+#     reason: >               # why this is a false positive for this architecture (auditable)
+#       Explanation.
+#     expires: YYYY-MM-DD     # omit for permanent architectural decisions
+
+suppressions:
+
+  # ── Class 1: infra-commons reusable workflows are first-party, not third-party ─
+  - id: own-reusable-mislabeled-third-party
+    file_pattern: "\\.github/workflows/.*\\.ya?ml(:\\d+)?$"
+    finding_pattern: "(third.party|external (org|repo|organisation)|vendor org|separate org|outside (org|organisation)).{0,100}(infra.commons|reusable workflow)|reusable workflow.{0,80}(external|third.party|untrusted|separate org)"
+    reason: >
+      Reusable workflows in infra-commons are first-party — the same operator controls all
+      entity orgs and infra-commons. The reviewer flags infra-commons as "external" because
+      the org name differs from the calling repo's org. SHA-pinned first-party reusables are
+      the approved call pattern. Not a third-party trust concern. Permanent.
+
+  # ── Class 2: AI review workflows deliberately route to Anthropic/OpenAI ──────
+  - id: ai-sub-processor-security-workflow
+    file_pattern: "\\.github/workflows/security\\.ya?ml(:\\d+(-\\d+)?)?$"
+    finding_pattern: "(PR content|pull request|diff|code content).{0,80}(OpenAI|Anthropic|overseas|US API)|routed to (OpenAI|Anthropic)|(OpenAI|Anthropic).{0,50}(overseas|cross.border|sub.processor)"
+    reason: >
+      The security.yml adversarial-review and legal-review jobs deliberately send PR diffs to
+      OpenAI and Anthropic for AI analysis — that is their entire purpose. PR diffs contain
+      code changes, not customer personal information. The Anthropic and OpenAI sub-processor
+      relationships are covered in the operator's sub-processor register and DPA disclosures.
+      Permanent architectural decision.
+
+  # ── Class 3: operator home-directory paths in control-plane scripts ───────────
+  - id: canonical-helper-script-path
+    file_pattern: "(scripts/|plans/|loop\\.sh|run.once\\.sh|queue.runner\\.sh|notify\\.sh|autoloop)"
+    finding_pattern: "(home directory|home.{0,20}path|personal home).{0,80}(reveal|individual|identity|user|personal|expose)|(hardcoded.{0,30}(path|directory).{0,30}(personal|home|reveal|individual|user))"
+    reason: >
+      Control-plane scripts and autoloop verify.sh files reference the operator's local
+      deployment path (e.g. ~/repos/sharedinfra). This is an admin-only path on the
+      operator's own machine — not user-facing, not stored alongside data subjects' information,
+      and not personal information under the Privacy Act 2020. Permanent.
+
+  # ── Class 4: operator account name in deployment path is not data-subject PII ─
+  - id: personal-name-in-deployment-path
+    file_pattern: "(scripts/|plans/|loop\\.sh|run.once\\.sh|queue.runner\\.sh|notify\\.sh)"
+    finding_pattern: "(first.name|username|personal.{0,5}name).{0,80}(path|comment|identifier|home.dir|version.controlled|source.code)|(comment.{0,60}(home directory|personal home).{0,40}(first.name|identifier))"
+    reason: >
+      An operator account name (short system username) appearing in an infrastructure path
+      comment is not personal information under the Privacy Act 2020 — it is a deployment-path
+      metadata identifier in an admin-only control-plane tool. These scripts are not published
+      to data subjects and process no customer PII at the paths in question. Permanent.
+
+  # ── Class 5: dependabot/first-party SHA-pin bumps are reviewed upgrades ────────
+  - id: routine-pinned-action-sha-bump
+    file_pattern: "\\.github/workflows/.*\\.ya?ml(:\\d+)?$"
+    finding_pattern: "(SHA.{0,10}(bump|changed|update)|unverified.{0,20}SHA|SHA.{0,20}without.{0,30}(review|provenance|audit)).{0,60}(reusable|action|workflow|pin)"
+    reason: >
+      Dependabot and deliberate SHA-pin bumps in workflow files are intentional, PR-reviewed
+      upgrades of first-party SHA pins. Pin-to-SHA is the supply-chain control; bumping the pin
+      via a reviewed PR is the supported upgrade path. Permanent.
+
+  # ── Class 6: AI review PR comment IS the human oversight gate ────────────────
+  - id: human-oversight-gate-by-design
+    file_pattern: "\\.github/workflows/security\\.ya?ml(:\\d+(-\\d+)?)?$"
+    finding_pattern: "(AI.{0,30}(review|generated|analysis|comment).{0,80}without.{0,40}(human oversight|oversight gate|accuracy controls|human review|documented)|automated.{0,50}without.{0,30}(oversight|human))"
+    reason: >
+      The adversarial-review and legal-review jobs post findings as PR comments that a human
+      developer reads before merging. The developer's review IS the documented human oversight
+      step. The CRITICAL-findings gate job hard-blocks merges until a human resolves the finding
+      — that is a mandatory oversight gate. The reviewer is flagging its own review-posting
+      architecture as lacking oversight. Permanent.

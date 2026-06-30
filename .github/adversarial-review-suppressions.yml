@@ -102,3 +102,35 @@ suppressions:
       A reusable-workflow/action SHA bump is an intentional, PR-reviewed upgrade of a first-party
       pin (infra-commons or the org's own repo). Pin-to-SHA is the supply-chain control; bumping
       the pin is the supported upgrade path, reviewed via the bumping PR. False positive.
+
+  # ── Class 3: operator control-plane scripts reference the local deployment path ─
+  - id: canonical-helper-script-path
+    file_pattern: "(loop\\.sh|run.once\\.sh|queue.runner\\.sh|notify\\.sh|scripts/.*\\.sh)"
+    finding_pattern: "(user.controlled|untrusted|unverified).{0,60}(path|directory|source|load).{0,40}(\\$HOME|home|sharedinfra)|scripts?.{0,20}(loaded|sourced).{0,20}from.{0,20}(untrusted|user.controlled|\\$HOME)"
+    reason: >
+      Control-plane bash scripts (loop.sh, run-once.sh, queue-runner.sh, notify.sh) load
+      helpers from a fixed operator deployment path. This path is on the operator's own
+      machine, is not user-controlled at runtime, and is not user-facing or data-subject PII.
+      The "untrusted $HOME" framing assumes CI runner context — these scripts run as a
+      systemd timer under the operator's account on a dedicated admin box. Permanent.
+
+  # ── Class 4: operator username in a deployment path is not data-subject PII ──
+  - id: personal-name-in-deployment-path
+    file_pattern: "(loop\\.sh|run.once\\.sh|queue.runner\\.sh|notify\\.sh|scripts/.*\\.sh|plans/.*\\.sh)"
+    finding_pattern: "(personal.{0,10}(name|identifier)|first.{0,10}name|username).{0,60}(path|comment|deploy|home.dir|version.controlled|source.code)"
+    reason: >
+      An operator account name appearing in a deployment-path comment or shell script is
+      infrastructure metadata, not data-subject personal information under the Privacy Act
+      2020. These paths are on the operator's own admin box, not in user-facing code or
+      stored alongside data subjects' information. Permanent.
+
+  # ── Class 6: the AI review PR comment IS the human oversight gate ──────────
+  - id: human-oversight-gate-by-design
+    file_pattern: ".*\\.github/workflows/security\\.ya?ml$"
+    finding_pattern: "(AI|automated).{0,40}(review|analysis|finding).{0,80}without.{0,40}(documented|human oversight|oversight gate|human review)|review.{0,40}comment.{0,40}without.{0,40}(oversight|human)"
+    reason: >
+      The adversarial-review and legal-review jobs post findings as PR comments that a human
+      developer reads before merging. The developer's review IS the human oversight step.
+      Additionally, the CRITICAL-findings gate job hard-blocks merges until a human resolves
+      the finding — that is a mandatory documented oversight gate. The reviewer is incorrectly
+      flagging its own review-posting architecture as lacking oversight. Permanent.
