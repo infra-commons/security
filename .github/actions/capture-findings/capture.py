@@ -54,6 +54,10 @@ _SHA_RE = re.compile(r'^[0-9a-fA-F]{40}$')
 # function signature accepts a Path and we want to fail closed if anything
 # unexpected slips in via a future caller.
 _SUPPRESSIONS_PATH_RE = re.compile(r'^\.github/[A-Za-z0-9_./-]+\.ya?ml$')
+# Defence in depth alongside the diff pathspec exclusion: drop any finding whose
+# location points at a review suppression file, so a suppression edit can never
+# be re-filed as a finding even if it reached the model some other way.
+_SUPPRESSION_LOC_RE = re.compile(r'\.github/[^\s:]*-suppressions\.ya?ml', re.IGNORECASE)
 _TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
 
 SYSTEM_PROMPT = """\
@@ -134,7 +138,13 @@ def get_diff(before: str, after: str) -> str:
     if not _SHA_RE.match(before) or not _SHA_RE.match(after):
         raise ValueError(f"Invalid commit SHA: before={before!r} after={after!r}")
     result = subprocess.run(
-        ["git", "diff", f"{before}...{after}"],
+        # Exclude the review suppression files from the reviewed diff. Editing a
+        # suppression entry must never itself be reviewed as a finding — otherwise
+        # the act of suppressing a false positive gets flagged as a "supply-chain
+        # trust" change, an infinite-noise loop. The suppression files are config,
+        # not executable code, so they carry no vulnerability of their own.
+        ["git", "diff", f"{before}...{after}",
+         "--", ".", ":(exclude,glob).github/*-suppressions.yml"],
         capture_output=True, encoding="utf-8", errors="replace", check=True,
     )
     diff = result.stdout
@@ -477,12 +487,14 @@ def open_issue_titles(token: str, repo: str) -> set[str]:
     return titles
 
 
-def closed_wontfix_keys(token: str, repo: str) -> set[str]:
-    """Return title strings and location keys for closed wont-fix security issues.
+def closed_suppressed_keys(token: str, repo: str) -> set[str]:
+    """Title/location keys for closed security issues that must never be re-filed.
 
-    Closing a security finding with the wont-fix label is a durable suppression:
-    the finding will not be re-filed on subsequent merges, at parity with how
-    the legal capture handles suppressed_issue_keys.
+    A finding closed as **not planned** (`state_reason`) or carrying the **wont-fix**
+    label is a durable suppression: the reviewer deliberately decided not to act on
+    it, so later merges touching the same code must not re-file it. Issues closed as
+    *completed* are intentionally NOT suppressed — if such a finding recurs it is a
+    regression worth re-surfacing.
     """
     keys: set[str] = set()
     with httpx.Client(timeout=_TIMEOUT) as client:
@@ -491,11 +503,14 @@ def closed_wontfix_keys(token: str, repo: str) -> set[str]:
             resp = client.get(
                 f"{GITHUB_API}/repos/{repo}/issues",
                 headers=_headers(token),
-                params={"labels": "wont-fix", "state": "closed", "per_page": 100, "page": page},
+                params={"labels": "security", "state": "closed", "per_page": 100, "page": page},
             )
             resp.raise_for_status()
             batch = resp.json()
             for issue in batch:
+                labels = {lbl.get("name") for lbl in issue.get("labels", [])}
+                if issue.get("state_reason") != "not_planned" and "wont-fix" not in labels:
+                    continue
                 title = issue["title"]
                 keys.add(title)
                 loc = _location_key(title)
@@ -599,6 +614,9 @@ def main() -> None:
 
     kept = []
     for f in findings:
+        if _SUPPRESSION_LOC_RE.search(f.get("location", "")):
+            print(f"  Skipped (suppression-file location): {f['title'][:60]}")
+            continue
         suppressed, sup_id = is_suppressed(f, suppressions)
         if suppressed:
             print(f"  Suppressed [{f['severity']}] {f['title'][:60]} (rule: {sup_id})")
@@ -619,8 +637,8 @@ def main() -> None:
         k for t in existing if (k := _location_key(t))
     }
 
-    wontfix = closed_wontfix_keys(token, repo)
-    print(f"  {len(wontfix)} closed wont-fix key(s) — these will not be re-filed")
+    suppressed_closed = closed_suppressed_keys(token, repo)
+    print(f"  {len(suppressed_closed)} closed not-planned/wont-fix key(s) — these will not be re-filed")
 
     _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 
@@ -632,8 +650,8 @@ def main() -> None:
         sev = raw_sev if raw_sev in _VALID_SEVERITIES else "LOW"
         title = issue_title(finding)
         loc_key = _location_key(title)
-        if title in wontfix or (loc_key and loc_key in wontfix):
-            print(f"  Suppressed (wont-fix closed): {title[:80]}")
+        if title in suppressed_closed or (loc_key and loc_key in suppressed_closed):
+            print(f"  Suppressed (closed not-planned/wont-fix): {title[:80]}")
             continue
         if title in existing or (loc_key and loc_key in existing_location_keys):
             print(f"  Already tracked: {title[:80]}")
