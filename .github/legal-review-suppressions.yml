@@ -79,3 +79,24 @@ suppressions:
       step. The CRITICAL-findings gate job hard-blocks merges until a human resolves the finding
       — that is a mandatory oversight gate. The reviewer is flagging its own review-posting
       architecture as lacking oversight. Permanent.
+
+  # ── Class 7: synthetic test fixtures are not data-subject PII ──────────────────
+  - id: synthetic-test-fixture-pii
+    file_pattern: "(^|/)(tests?/|.*_test\\.|test_.*|.*\\.spec\\.|fixtures?/|conftest\\.py)"
+    finding_pattern: "(test (fixture|data|double|sample)|fixture|synthetic|sample data|mock (data|user)).{0,80}(pii|personal (info|data)|named individual|realistic.{0,15}(name|person)|privacy)|realistic.{0,20}(name|individual).{0,40}test"
+    reason: >
+      Test fixtures and sample data use deliberately synthetic, non-real identities to exercise
+      code paths. They are not the personal information of any data subject and are never used to
+      process real people's data. Flagging a synthetic fixture name as a PII-hygiene risk is a
+      false positive. Permanent.
+
+  # ── Class 8: Anthropic inference sub-processor is a disclosed, accepted decision ─
+  - id: anthropic-inference-residency-accepted
+    finding_pattern: "(cross.border|overseas|off.?shore|sub.?processor|inference (provider|residency|to)).{0,90}(anthropic|united states|\\bus\\b)|anthropic.{0,80}(cross.border|overseas|us inference|sub.?processor|permanent|all environments)"
+    reason: >
+      Routing model inference to Anthropic (US) is a formalised, disclosed, accepted architectural
+      decision — documented in the inference-provider ADR, the operator's sub-processor register,
+      a residency configuration setting, and the customer data-processing agreements. Documenting or
+      restating that accepted decision (e.g. in an ADR) is not itself a legal defect. A genuinely
+      new transfer concern should be raised against the DPA/register, not re-filed per merge.
+      Permanent.
