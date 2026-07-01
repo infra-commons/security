@@ -96,7 +96,7 @@ suppressions:
     reason: >
       Routing model inference to Anthropic (US) is a formalised, disclosed, accepted architectural
       decision — documented in the inference-provider ADR, the operator's sub-processor register,
-      the inference_residency config field, and the client DPA amendments. Documenting or
+      a residency configuration setting, and the customer data-processing agreements. Documenting or
       restating that accepted decision (e.g. in an ADR) is not itself a legal defect. A genuinely
       new transfer concern should be raised against the DPA/register, not re-filed per merge.
       Permanent.
