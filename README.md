@@ -71,6 +71,24 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
 | `tier-a.yml` / `tier-b.yml` / `tier-c.yml` | Tiered security posture bundles |
 
+#### `capture-findings-reusable.yml` internal pin — moving tag, not a raw SHA
+
+Unlike every other `uses:` in this repo, the reusable's own composite-action pin
+(`infra-commons/security/.github/actions/capture-findings@capture-findings/v1`) is
+pinned to a **moving major tag**, not a 40-char SHA — `pin-check.yml` carries a narrow,
+deliberate exception for it (see `.github/scripts/check-action-pins.sh`). This is the
+one internal pin we own end-to-end, so the risk a SHA pin protects against (a
+third party rewriting history under us) doesn't apply.
+
+**To ship a `capture.py` fix:** cut a new immutable release tag (`capture-findings/vX.Y.Z`)
+on the commit with the fix, then move `capture-findings/v1` to point at it —
+`git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`.
+That's it: **zero** edits to `capture-findings-reusable.yml` or any consumer. Every
+caller that pins the reusable at a post-adoption SHA (or `@main`) picks up the fix on
+its next run. This replaces the old failure mode (2026-07-02, PRs #20/#21) where the
+reusable's inner pin silently lagged a `capture.py` fix because bumping it was a
+separate, easy-to-forget manual step.
+
 ## `pentest/` — internal penetration-test toolkit
 
 A standalone, locally-runnable toolkit (not a workflow) that actively probes a
