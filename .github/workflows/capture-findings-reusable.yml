@@ -48,9 +48,10 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Pinned to the #20 noise-fix commit: excludes .github/*-suppressions.yml from
-      # the reviewed diff and treats not_planned closes as durable (was @52ee5a8, pre-fix).
-      - uses: infra-commons/security/.github/actions/capture-findings@d5ed3a2a234d47fc66490d1f05e7baddac351b81
+      # Pinned to the capture-findings/v1 moving tag, not a raw SHA: a capture.py fix
+      # ships by moving this tag (see README) — no reusable/consumer edit needed, which
+      # is what the 2026-07-02 stale-inner-pin incident (#20/#21) cost us.
+      - uses: infra-commons/security/.github/actions/capture-findings@capture-findings/v1
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           github-token: ${{ github.token }}

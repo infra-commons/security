@@ -1,9 +1,10 @@
 name: Pin check
 
 # Guards the supply chain: every `uses:` in this repo must be pinned to a 40-char
-# commit SHA (or be a local `./` ref / digest-pinned image). Prevents a SHA-pinned
-# reusable workflow from internally calling a composite action at a mutable `@main`,
-# which would defeat callers' pins. See .github/scripts/check-action-pins.sh.
+# commit SHA (or be a local `./` ref / digest-pinned image / own-repo capture-findings
+# version tag — see check-action-pins.sh). Prevents a SHA-pinned reusable workflow from
+# internally calling a composite action at a mutable `@main`, which would defeat
+# callers' pins. See .github/scripts/check-action-pins.sh.
 
 on:
   pull_request:
