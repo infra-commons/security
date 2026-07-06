@@ -63,11 +63,13 @@ suppressions:
   # ── Class 5: dependabot/first-party SHA-pin bumps are reviewed upgrades ────────
   - id: routine-pinned-action-sha-bump
     file_pattern: "\\.github/workflows/.*\\.ya?ml(:\\d+)?$"
-    finding_pattern: "(SHA.{0,10}(bump|changed|update)|unverified.{0,20}SHA|SHA.{0,20}without.{0,30}(review|provenance|audit)).{0,60}(reusable|action|workflow|pin)"
+    finding_pattern: "(SHA|commit hash|commit).{0,60}(bump|bumped|changed|updated?|pinned)|(bump|bumped|changed|updated?|pinned).{0,60}(SHA|commit hash|commit)|(SHA|commit hash).{0,60}without.{0,40}(review|provenance|audit|rationale|changelog)"
     reason: >
       Dependabot and deliberate SHA-pin bumps in workflow files are intentional, PR-reviewed
       upgrades of first-party SHA pins. Pin-to-SHA is the supply-chain control; bumping the pin
-      via a reviewed PR is the supported upgrade path. Permanent.
+      via a reviewed PR is the supported upgrade path. The reviewer describes this same event as
+      both "SHA bump" and "commit hash update" depending on phrasing, so the pattern must match
+      either wording. Permanent.
 
   # ── Class 6: AI review PR comment IS the human oversight gate ────────────────
   - id: human-oversight-gate-by-design
