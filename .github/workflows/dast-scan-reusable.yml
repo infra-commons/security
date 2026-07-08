@@ -1,0 +1,226 @@
+name: DAST scan (Nuclei, reusable)
+
+# Reusable dynamic application security test. Runs Nuclei (pinned binary + pinned
+# templates) against a live HTTPS target, merges/dedupes findings, and triages
+# them into GitHub Issues (labels: security, severity:*, source:dast) via the
+# triage script that ships WITH this reusable (dast/triage.py) — callers no
+# longer vendor their own copy.
+#
+# Scope (non-intrusive by design): headers, TLS, exposures, tech fingerprint, and
+# passive/header checks on one authenticated endpoint. Fuzzing/injection/RCE/DoS
+# templates are excluded so the scan never triggers real backend work (e.g. LLM
+# calls) or affects availability. HMAC-signed webhook routes are out of scope —
+# use the pen-test reusable for those.
+#
+# Caller pattern:
+#
+#   jobs:
+#     dast:
+#       uses: infra-commons/security/.github/workflows/dast-scan-reusable.yml@<SHA>
+#       permissions:
+#         contents: read
+#         issues: write
+#       with:
+#         target_url: ${{ vars.ROLLIQ_TEST_URL }}
+#         auth_path: /transcripts        # optional; omit to skip the authed pass
+#         suppressions_path: .github/dast-suppressions.yml
+#       secrets:
+#         auth_bearer_token: ${{ secrets.ROLLIQ_TEST_TRANSCRIPT_UPLOAD_SECRET }}
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: HTTPS base URL of the target (no trailing slash).
+        type: string
+        required: true
+      target_host_allowlist:
+        description: >-
+          Anchored regex the target host must match (defence in depth against
+          scanning the wrong host). Defaults to Azure Container Apps + rolliq.com.
+        type: string
+        required: false
+        default: '^https://([-a-z0-9.]+\.azurecontainerapps\.io|[-a-z0-9.]+\.rolliq\.com)([/?#]|$)'
+      auth_path:
+        description: >-
+          Path of one authenticated endpoint to run passive/header checks
+          against (e.g. /transcripts). Empty (default) skips the authed pass.
+        type: string
+        required: false
+        default: ""
+      min_severity:
+        description: Minimum Nuclei severity to report.
+        type: string
+        required: false
+        default: medium
+      suppressions_path:
+        description: Path (in the caller repo) to the DAST suppressions YAML.
+        type: string
+        required: false
+        default: .github/dast-suppressions.yml
+      security_ref:
+        description: >-
+          Ref of infra-commons/security to source dast/triage.py from. Pin to the
+          same SHA the caller pins this reusable to so the triage code matches.
+        type: string
+        required: true
+    secrets:
+      auth_bearer_token:
+        description: Bearer token for the authenticated endpoint (required only when auth_path is set).
+        required: false
+
+# Nuclei binary + templates pins. Bump deliberately; a pinned template set stops
+# a changed upstream from silently altering scan behaviour.
+env:
+  NUCLEI_VERSION: v3.3.9
+  NUCLEI_SHA256: dfecedc31364d70b7291b347c74fd4d1d3185d30301c025b7490717d29daf28a
+  NUCLEI_TEMPLATES_REF: b98b28b191298ad70499ee4f5fc6b7e6ec67f6ed # v10.1.3, 2025-02-21
+  EXCLUDE_TAGS: intrusive,dos,fuzzing,rce,sqli,xss,ssrf,traversal,injection
+
+jobs:
+  nuclei:
+    name: Nuclei DAST scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TARGET_URL: ${{ inputs.target_url }}
+      MIN_SEVERITY: ${{ inputs.min_severity }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Ship the triage script with the reusable rather than the caller. Pinned
+      # to the caller-supplied security_ref so the triage code is the version the
+      # caller reviewed alongside this workflow.
+      - name: Checkout infra-commons/security (triage script)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: infra-commons/security
+          ref: ${{ inputs.security_ref }}
+          path: security-tool
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout Nuclei templates (pinned)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: projectdiscovery/nuclei-templates
+          ref: ${{ env.NUCLEI_TEMPLATES_REF }}
+          path: nuclei-templates
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Mask secrets
+        run: echo "::add-mask::${{ secrets.auth_bearer_token }}"
+
+      - name: Validate target URL
+        env:
+          HOST_ALLOWLIST: ${{ inputs.target_host_allowlist }}
+        run: |
+          if [[ -z "$TARGET_URL" ]]; then
+            echo "Error: target_url is empty." >&2
+            exit 1
+          fi
+          # The ([/?#]|$) anchor in the default allowlist prevents a host being a
+          # prefix of a longer attacker-controlled hostname.
+          if ! echo "$TARGET_URL" | grep -qE "$HOST_ALLOWLIST"; then
+            echo "Error: target_url does not match the host allowlist." >&2
+            exit 1
+          fi
+          echo "Target: $TARGET_URL"
+
+      - name: Health-check target before scanning
+        run: |
+          STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$TARGET_URL/health" || echo "000")
+          if [[ "$STATUS" != "200" ]]; then
+            echo "Error: /health returned HTTP $STATUS — aborting to avoid scanning a degraded target." >&2
+            exit 1
+          fi
+          echo "Target healthy (HTTP 200)"
+
+      - name: Install Nuclei
+        run: |
+          curl -sL "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION#v}_linux_amd64.zip" \
+            -o nuclei.zip
+          echo "${NUCLEI_SHA256}  nuclei.zip" | sha256sum --check --status
+          unzip -q nuclei.zip nuclei
+          chmod +x nuclei
+          sudo mv nuclei /usr/local/bin/nuclei
+          nuclei -version
+
+      - name: Run Nuclei scan — unauthenticated paths
+        run: |
+          nuclei \
+            -target "$TARGET_URL" \
+            -t nuclei-templates/ \
+            -tags misconfiguration,exposure,ssl,headers,tech \
+            -exclude-tags "$EXCLUDE_TAGS" \
+            -severity "$MIN_SEVERITY,high,critical" \
+            -rate-limit 10 \
+            -timeout 10 \
+            -bulk-size 10 \
+            -no-interactsh \
+            -disable-update-check \
+            -jsonl \
+            -output "$RUNNER_TEMP/nuclei-unauth.jsonl" \
+            || true   # findings exit non-zero; capture them, don't abort
+
+      - name: Run Nuclei scan — authenticated endpoint
+        if: ${{ inputs.auth_path != '' }}
+        env:
+          AUTH_PATH: ${{ inputs.auth_path }}
+          UPLOAD_SECRET: ${{ secrets.auth_bearer_token }}
+        run: |
+          if [[ -z "$UPLOAD_SECRET" ]]; then
+            echo "Error: auth_path is set but auth_bearer_token secret is empty." >&2
+            exit 1
+          fi
+          nuclei \
+            -target "${TARGET_URL}${AUTH_PATH}" \
+            -t nuclei-templates/ \
+            -tags misconfiguration,headers \
+            -exclude-tags "$EXCLUDE_TAGS" \
+            -header "Authorization: Bearer $UPLOAD_SECRET" \
+            -severity "$MIN_SEVERITY,high,critical" \
+            -rate-limit 5 \
+            -timeout 10 \
+            -no-interactsh \
+            -disable-update-check \
+            -jsonl \
+            -output "$RUNNER_TEMP/nuclei-auth.jsonl" \
+            || true
+
+      - name: Merge and deduplicate results
+        run: |
+          cat "$RUNNER_TEMP/nuclei-unauth.jsonl" "$RUNNER_TEMP/nuclei-auth.jsonl" 2>/dev/null \
+            | sort -u > "$RUNNER_TEMP/nuclei-all.jsonl" || true
+          echo "Total findings: $(wc -l < "$RUNNER_TEMP/nuclei-all.jsonl")"
+
+      - name: Upload raw results artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dast-nuclei-results
+          path: ${{ runner.temp }}/nuclei-all.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+
+      - name: Triage findings and file / close GitHub Issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SUPPRESSIONS: ${{ inputs.suppressions_path }}
+        run: |
+          python3 security-tool/dast/triage.py \
+            --findings "$RUNNER_TEMP/nuclei-all.jsonl" \
+            --suppressions "$SUPPRESSIONS" \
+            --repo "$REPO" \
+            --run-url "$RUN_URL"
