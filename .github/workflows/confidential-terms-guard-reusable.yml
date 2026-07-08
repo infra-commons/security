@@ -1,0 +1,234 @@
+name: Confidential-terms guard (reusable)
+
+# Reusable confidential-terms guard. Prevents real customer / third-party names
+# from being committed to a calling repo. The denylist is NEVER stored in any
+# repo consuming this workflow (that would defeat the purpose) — it is derived
+# at runtime from the private, PR-gated clients-config repo:
+#   * each external customer's `display_name` and `client_slug`, plus
+#   * any extra terms in clients-config/confidential-terms.txt (third-party
+#     consultancies, individuals) if that file exists.
+#
+# Owner-operated test/sandbox clients are excluded (their slugs legitimately
+# appear in docs). Word-boundary, case-insensitive matching is used so common
+# English substrings ("looking", "kind") do not trip the guard.
+#
+# Legitimate references can be acknowledged per-repo in the caller's allow file
+# (default .github/confidential-terms-allow.txt, one term per line). Keep that
+# list short and justified.
+#
+# Caller pattern (trigger on pull_request and push to main):
+#
+#   jobs:
+#     guard:
+#       uses: infra-commons/security/.github/workflows/confidential-terms-guard-reusable.yml@<SHA>
+#       secrets:
+#         clients_config_token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+#
+# Make the resulting check a required status check in branch protection so a PR
+# cannot merge while it fails.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      config_repo:
+        description: Private repo holding clients/*.yaml and confidential-terms.txt.
+        type: string
+        required: false
+        default: rolliq-com/clients-config
+      allow_file:
+        description: >-
+          Path (in the calling repo) of the local allowlist of acknowledged
+          legitimate references; one term per line, '#' comments allowed.
+        type: string
+        required: false
+        default: .github/confidential-terms-allow.txt
+      owned_slugs:
+        description: >-
+          Space-separated client slugs owned by the operator (test/sandbox
+          clients) whose names may legitimately appear in docs.
+        type: string
+        required: false
+        default: rolliq-test sandbox
+      extra_exclude_paths:
+        description: >-
+          Extra newline-separated tracked paths (exact match or trailing-slash
+          prefix) to skip during the scan, on top of the caller workflow stub,
+          the allow file, and any checked-out clients-config copy.
+        type: string
+        required: false
+        default: ""
+    secrets:
+      clients_config_token:
+        description: Read token for the private clients-config repo (fail closed when absent).
+        required: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Skip drafts (advisory guard; re-fires on ready_for_review) — github.event
+    # here is the CALLER's event, so this works from the reusable. On push
+    # events pull_request is null, so the guard is falsy and the job runs as
+    # normal. Also skip Dependabot PRs: GitHub withholds repo/org secrets from
+    # Dependabot-triggered pull_request runs (clients_config_token would be
+    # empty, tripping the fail-closed check below), and Dependabot PRs only
+    # ever touch dependency/workflow-pin lines — no risk of a confidential
+    # term slipping in.
+    if: ${{ !github.event.pull_request.draft && github.actor != 'dependabot[bot]' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Fail closed: without the token we cannot build the denylist, and a
+      # silent empty list would let a real name slip through unnoticed.
+      - name: Require clients-config read token (fail closed)
+        env:
+          CLIENTS_CONFIG_TOKEN: ${{ secrets.clients_config_token }}
+        run: |
+          if [ -z "$CLIENTS_CONFIG_TOKEN" ]; then
+            echo "::error::clients_config_token is unset/empty — cannot build the confidential-terms denylist. Refusing to fail open." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.config_repo }}
+          token: ${{ secrets.clients_config_token }}
+          path: clients-config
+
+      - name: Install PyYAML
+        run: pip install pyyaml==6.0.2
+
+      - name: Scan tracked files for confidential terms
+        env:
+          OWNED_SLUGS: ${{ inputs.owned_slugs }}
+          ALLOW_FILE: ${{ inputs.allow_file }}
+          EXTRA_EXCLUDES: ${{ inputs.extra_exclude_paths }}
+        run: |
+          python3 << 'EOF'
+          import os
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          # ── Build the denylist from clients-config (never stored in callers) ──
+          # Skip operator-owned test/sandbox clients: their slugs legitimately
+          # appear in docs. Classification prefers an explicit
+          # environment_class == "test" and falls back to the owned-slug input.
+          OWNED_SLUGS = set(os.environ.get("OWNED_SLUGS", "").split())
+          # Words we never treat as a confidential term even if part of a name.
+          STOPWORDS = {
+              "the", "and", "ltd", "inc", "pty", "limited", "group", "holdings",
+              "recruitment", "client", "internal", "test", "sandbox", "rolliq",
+              "co", "llc", "plc", "gmbh", "corp", "company", "services",
+          }
+
+          terms: set[str] = set()
+          for cfg_path in sorted(Path("clients-config/clients").glob("*.yaml")):
+              if cfg_path.name.startswith("_"):
+                  continue
+              try:
+                  cfg = yaml.safe_load(cfg_path.read_text()) or {}
+              except Exception as exc:  # noqa: BLE001
+                  print(f"::warning::skipping {cfg_path}: {exc}", file=sys.stderr)
+                  continue
+              slug = str(cfg.get("client_slug", "")).strip()
+              env_class = str(cfg.get("environment_class", "")).strip().lower()
+              if env_class == "test" or slug in OWNED_SLUGS:
+                  continue
+              display = str(cfg.get("display_name", "")).strip()
+              if slug:
+                  terms.add(slug)
+              if display:
+                  terms.add(display)  # full phrase
+                  for word in re.split(r"\s+", display):
+                      if len(word) > 3 and word.lower() not in STOPWORDS:
+                          terms.add(word)
+
+          # Extra terms (third-party consultancies, individuals) maintained in
+          # clients-config, one per line; '#' comments allowed.
+          extra = Path("clients-config/confidential-terms.txt")
+          if extra.exists():
+              for line in extra.read_text().splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  if line:
+                      terms.add(line)
+
+          if not terms:
+              print("::error::denylist is empty — clients-config produced no terms. Refusing to fail open.")
+              sys.exit(1)
+
+          # ── Local allowlist of acknowledged legitimate references ──
+          allow: set[str] = set()
+          allow_rel = os.environ.get("ALLOW_FILE", ".github/confidential-terms-allow.txt")
+          allow_path = Path(allow_rel)
+          if allow_path.exists():
+              for line in allow_path.read_text().splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  if line:
+                      allow.add(line.lower())
+
+          scan_terms = sorted(t for t in terms if t.lower() not in allow)
+          # Word-boundary, case-insensitive; longest first so overlapping matches
+          # report the most specific term.
+          patterns = [
+              (t, re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE))
+              for t in sorted(scan_terms, key=len, reverse=True)
+          ]
+
+          # ── Files to scan: tracked, text, excluding the guard's own machinery ──
+          # The checked-out clients-config copy is untracked (not in git ls-files),
+          # but exclude it defensively anyway. Caller workflow stubs matching the
+          # guard's filename pattern are excluded so the stub itself (which names
+          # nothing confidential) can't self-trip on future edits.
+          exclude_paths = {allow_rel}
+          exclude_prefixes = ["clients-config/"]
+          for line in os.environ.get("EXTRA_EXCLUDES", "").splitlines():
+              line = line.strip()
+              if not line:
+                  continue
+              if line.endswith("/"):
+                  exclude_prefixes.append(line)
+              else:
+                  exclude_paths.add(line)
+          stub_rx = re.compile(r"\A\.github/workflows/confidential-terms-guard[^/]*\.ya?ml\Z")
+
+          tracked = subprocess.run(
+              ["git", "ls-files"], capture_output=True, text=True, check=True
+          ).stdout.splitlines()
+
+          hits = []
+          for rel in tracked:
+              if rel in exclude_paths or stub_rx.match(rel):
+                  continue
+              if any(rel.startswith(p) for p in exclude_prefixes):
+                  continue
+              p = Path(rel)
+              try:
+                  text = p.read_text(encoding="utf-8")
+              except (UnicodeDecodeError, OSError):
+                  continue  # binary / unreadable — skip
+              for lineno, line in enumerate(text.splitlines(), 1):
+                  for term, rx in patterns:
+                      if rx.search(line):
+                          hits.append((rel, lineno, term, line.strip()[:160]))
+
+          if hits:
+              print("::error::Confidential customer/third-party terms found in tracked files.")
+              for rel, lineno, term, snippet in hits:
+                  print(f"::error file={rel},line={lineno}::confidential term '{term}': {snippet}")
+              print(
+                  f"\n{len(hits)} occurrence(s). Genericise the reference "
+                  "(e.g. 'the client', 'the first customer', a neutral 'acme' slug), "
+                  f"or, if genuinely legitimate, add the term to {allow_rel} "
+                  "with justification."
+              )
+              sys.exit(1)
+
+          print(f"OK — scanned {len(tracked)} tracked files against {len(patterns)} denylist term(s); none present.")
+          EOF
