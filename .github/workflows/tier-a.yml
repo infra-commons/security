@@ -31,7 +31,7 @@ name: Security — Tier A (reusable)
 #
 #   jobs:
 #     security:
-#       uses: rolliq-shared-infra/security/.github/workflows/tier-a.yml@<SHA>
+#       uses: infra-commons/security/.github/workflows/tier-a.yml@<SHA>
 #       with:
 #         semgrep_config: 'p/python'
 #         run_openai: false
