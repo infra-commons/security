@@ -110,6 +110,33 @@ SECURITY_STATUS_LABEL = "security-status"
 ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 AGGREGATE_SOURCES = {"adversarial-ai", "semgrep", "trivy"}
 
+# Severity ordering for the configurable reporting floor (SEVERITY_FLOOR env).
+# Findings ranked below the floor are dropped before any issue is created, so a
+# repo can opt to only track (say) HIGH+ without editing this script. The default
+# floor is LOW, i.e. report everything — the historical behaviour.
+SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+DEFAULT_SEVERITY_FLOOR = "LOW"
+
+
+def resolve_severity_floor() -> str:
+    """Return the reporting floor from SEVERITY_FLOOR, defaulting to LOW.
+
+    An unset, empty, or unrecognised value falls back to LOW (report all) so a
+    misconfiguration can never silently suppress findings — the fail-safe
+    direction for a security control.
+    """
+    raw = os.environ.get("SEVERITY_FLOOR", "").strip().upper()
+    if raw in SEVERITY_RANK:
+        return raw
+    if raw:
+        valid = ", ".join(sorted(SEVERITY_RANK, key=SEVERITY_RANK.get, reverse=True))
+        print(
+            f"  WARNING: SEVERITY_FLOOR={raw!r} is not one of [{valid}]; "
+            f"defaulting to {DEFAULT_SEVERITY_FLOOR} (report all).",
+            file=sys.stderr,
+        )
+    return DEFAULT_SEVERITY_FLOOR
+
 # ── Sanitisation ───────────────────────────────────────────────────────────────
 
 _UNICODE_LINE_SEPS = frozenset((0x2028, 0x2029))
@@ -1204,6 +1231,26 @@ def run_create_issues() -> None:
         all_findings = filtered
         if suppressed_ids:
             print(f"  Total suppressed: {len(suppressed_ids)}")
+
+    # ── Apply the configurable severity floor ──────────────────────────────────
+    # Findings ranked below SEVERITY_FLOOR are dropped before any issue work, so
+    # below-floor aggregates/individuals also fall out of expected_titles and get
+    # auto-closed by the resolved-findings pass below. Default LOW = report all.
+    floor = resolve_severity_floor()
+    if SEVERITY_RANK[floor] > SEVERITY_RANK[DEFAULT_SEVERITY_FLOOR]:
+        floor_rank = SEVERITY_RANK[floor]
+        kept: list[dict] = []
+        dropped = 0
+        for f in all_findings:
+            # Unrecognised severities have no rank — keep them (fail safe: never
+            # silently hide a finding we could not classify).
+            rank = SEVERITY_RANK.get(str(f.get("severity", "")).upper())
+            if rank is None or rank >= floor_rank:
+                kept.append(f)
+            else:
+                dropped += 1
+        print(f"Severity floor: {floor} — kept {len(kept)}, dropped {dropped} below-floor finding(s)")
+        all_findings = kept
 
     # ── Ensure labels exist ────────────────────────────────────────────────────
     print("Ensuring labels exist …")
