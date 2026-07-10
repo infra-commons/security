@@ -1,0 +1,192 @@
+name: Auto-merge churn (reusable)
+
+# Auto-approves and enables native auto-merge for LOW-RISK, BOT-AUTHORED churn
+# PRs so Kevin's review queue is not spent on mechanical sync/fix PRs. It NEVER
+# merges anything itself — it only approves (satisfying the reviews:1 ruleset)
+# and turns on `--auto`, so the full required-check gauntlet (adversarial,
+# legal, tests, pin-check) still runs and gates the merge exactly as today.
+#
+# This changes WHO can merge WHAT without a human review, so its first
+# deployment is a deliberate, Kevin-approved step (Plan 1c).
+#
+# ── Eligibility (ALL must hold) ────────────────────────────────────────────────
+#   1. PR author ∈ { rolliqdotcom, infra-commons-bot, dependabot[bot] }
+#   2. NONE of the changed files hit a hard-exclusion guardrail (below)
+#   3. EITHER every changed file matches the path allowlist
+#      (suppressions + confidential-terms, plus any caller-supplied globs)
+#      OR the PR carries the label `autofix:security`
+# Anything else is a silent no-op — the PR simply waits for Kevin as before.
+#
+# ── Hard exclusions (cannot be overridden by any allowlist) ────────────────────
+#   • .github/workflows/**   ← self-privilege-escalation guard. NOTE: this is why
+#     "action-pin sync" PRs (pins live inside workflow files) are NOT auto-merged
+#     — they fall through to Kevin by design.
+#   • **/branch-rulesets.json, **/CODEOWNERS, scripts/apply-branch-rulesets.sh
+#   • clients-config repo entirely (belt-and-braces; callers also simply omit it)
+#   • dependabot major bumps never match the allowlist or carry the label, so
+#     they naturally fall through (daily-health-check already handles the
+#     minor/patch dependabot lane; dependabot is listed here only for parity).
+#
+# ── Caller pattern ─────────────────────────────────────────────────────────────
+#   name: Auto-merge churn
+#   on:
+#     pull_request_target:            # NOT pull_request — a pull_request run from
+#       types: [opened, reopened, synchronize, labeled, ready_for_review]
+#   # bot-authored PRs gets a read-only token and no auto-merge rights.
+#   # pull_request_target runs in the base repo with a write token. This workflow
+#   # never checks out or executes PR code — it only calls the gh API on the PR
+#   # number — so pull_request_target is safe here.
+#   concurrency:
+#     group: auto-merge-churn-${{ github.event.pull_request.number }}
+#     cancel-in-progress: true
+#   permissions:
+#     contents: write          # enable auto-merge / squash
+#     pull-requests: write      # approve + enable auto-merge
+#   jobs:
+#     auto-merge:
+#       uses: infra-commons/security/.github/workflows/auto-merge-churn-reusable.yml@<SHA>
+#       # optional: extend the path allowlist with repo-specific sync-managed files
+#       # with:
+#       #   allowed_globs: |
+#       #     .github/some-other-sync-managed-file.txt
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      allowed_globs:
+        description: >-
+          Extra newline-separated path globs to treat as auto-mergeable, ON TOP
+          of the built-in suppressions + confidential-terms allowlist. Use ** to
+          match across directories. Files under a hard-exclusion (.github/
+          workflows/**, rulesets, CODEOWNERS) are never eligible regardless.
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  auto-merge:
+    name: Evaluate + auto-merge eligible churn
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only bot authors can ever be eligible — cheap pre-filter so human PRs skip
+    # the job entirely. The script re-checks the full author allowlist too.
+    if: >-
+      github.event.pull_request.user.login == 'rolliqdotcom' ||
+      github.event.pull_request.user.login == 'infra-commons-bot' ||
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Evaluate eligibility and enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALLOWED_GLOBS: ${{ inputs.allowed_globs }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, subprocess, sys
+
+          REPO   = os.environ["GH_REPO"]
+          NUM    = os.environ["PR_NUMBER"]
+          AUTHOR = os.environ["PR_AUTHOR"]
+          RUN    = os.environ.get("RUN_URL", "")
+
+          ALLOWED_AUTHORS = {"rolliqdotcom", "infra-commons-bot", "dependabot[bot]"}
+
+          # Hard exclusions — self-privilege-escalation surface. Never auto-merged
+          # even if an allowlist glob would otherwise match.
+          HARD_EXCLUDE = [
+              ".github/workflows/**",
+              "**/branch-rulesets.json", "branch-rulesets.json",
+              "**/CODEOWNERS", "CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS",
+              "scripts/apply-branch-rulesets.sh",
+          ]
+          # Built-in path allowlist — the low-risk sync-managed churn files.
+          DEFAULT_ALLOW = [
+              ".github/*-suppressions.yml",
+              ".github/confidential-terms-allow.txt",
+          ]
+          extra = [g.strip() for g in os.environ.get("ALLOWED_GLOBS", "").splitlines() if g.strip()]
+          ALLOW = DEFAULT_ALLOW + extra
+
+          def glob_to_re(pat: str) -> "re.Pattern":
+              # ** → any (incl. /); * → any except /; ? → single non-/.
+              out, i = ["^"], 0
+              while i < len(pat):
+                  if pat[i:i + 2] == "**":
+                      out.append(".*"); i += 2; continue
+                  c = pat[i]
+                  if c == "*":   out.append("[^/]*")
+                  elif c == "?": out.append("[^/]")
+                  else:          out.append(re.escape(c))
+                  i += 1
+              out.append("$")
+              return re.compile("".join(out))
+
+          HARD_RE  = [glob_to_re(p) for p in HARD_EXCLUDE]
+          ALLOW_RE = [glob_to_re(p) for p in ALLOW]
+
+          def gh_json(*args):
+              r = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
+              return json.loads(r.stdout)
+
+          def noop(reason: str) -> None:
+              print(f"auto-merge-churn: NO-OP — {reason}")
+              sys.exit(0)
+
+          # Belt-and-braces: never touch clients-config even if wired by mistake.
+          if REPO.split("/")[-1] == "clients-config":
+              noop("clients-config is excluded entirely")
+
+          if AUTHOR not in ALLOWED_AUTHORS:
+              noop(f"author {AUTHOR!r} not in allowlist")
+
+          data  = gh_json("pr", "view", NUM, "--repo", REPO, "--json", "files,labels")
+          files = [f["path"] for f in data.get("files", [])]
+          labels = {l["name"] for l in data.get("labels", [])}
+
+          if not files:
+              noop("no changed files reported")
+
+          hit = next((f for f in files for rx in HARD_RE if rx.match(f)), None)
+          if hit:
+              noop(f"guardrail: changed file {hit!r} is a hard-exclusion")
+
+          all_allowed = all(any(rx.match(f) for rx in ALLOW_RE) for f in files)
+          has_autofix = "autofix:security" in labels
+          if not (all_allowed or has_autofix):
+              offending = [f for f in files if not any(rx.match(f) for rx in ALLOW_RE)]
+              noop("not eligible — no autofix:security label and these files are "
+                   f"outside the allowlist: {offending}")
+
+          basis = "autofix:security label" if has_autofix else "all files within path allowlist"
+          print(f"auto-merge-churn: ELIGIBLE ({basis}) — approving #{NUM} in {REPO}")
+
+          # Approve (satisfies reviews:1; bot != PR author so it counts).
+          try:
+              subprocess.run(
+                  ["gh", "pr", "review", NUM, "--repo", REPO, "--approve", "--body",
+                   f"Auto-approved by auto-merge-churn ({basis}). "
+                   f"Required checks still gate the merge. Run: {RUN}"],
+                  capture_output=True, text=True, check=True)
+              print("  approved")
+          except subprocess.CalledProcessError as exc:
+              err = (exc.stderr or "").lower()
+              if "already" in err or "can't approve" in err or "cannot approve" in err:
+                  print("  already approved")
+              else:
+                  print(f"  WARNING: approval failed: {exc.stderr.strip()[:120]}", file=sys.stderr)
+
+          # Enable native auto-merge — merges only once required checks pass.
+          try:
+              subprocess.run(
+                  ["gh", "pr", "merge", NUM, "--repo", REPO, "--auto", "--squash"],
+                  capture_output=True, text=True, check=True)
+              print("  auto-merge enabled (squash)")
+          except subprocess.CalledProcessError as exc:
+              print(f"  WARNING: could not enable auto-merge: {exc.stderr.strip()[:120]}; "
+                    f"PR is approved — Kevin can merge manually", file=sys.stderr)
+          PYEOF
