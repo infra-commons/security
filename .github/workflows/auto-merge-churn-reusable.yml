@@ -99,6 +99,12 @@ jobs:
     permissions:
       contents: write        # enable native auto-merge / squash
       pull-requests: write   # read PR files/labels, approve, enable auto-merge
+    # `secrets` context is NOT available in a step `if:` (it fails workflow parsing
+    # → startup_failure), so surface the App-id presence as an env var here and gate
+    # the mint step on that instead. `env` referencing `secrets` is allowed, and
+    # `env` IS available in step `if:`.
+    env:
+      HAS_APPROVER_APP: ${{ secrets.approve_app_id != '' }}
     # Only bot authors can ever be eligible — cheap pre-filter so human PRs skip
     # the job entirely. The script re-checks the full author allowlist too.
     if: >-
@@ -112,7 +118,7 @@ jobs:
       # falls back to GITHUB_TOKEN and the approve fails soft.
       - name: Mint approver App token
         id: approver
-        if: ${{ secrets.approve_app_id != '' }}
+        if: ${{ env.HAS_APPROVER_APP == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.approve_app_id }}
