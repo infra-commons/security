@@ -45,6 +45,13 @@ inputs:
     description: "Workflow-run URL to include in created issues (create-issues / update-dashboard)"
     required: false
     default: ""
+  severity-floor:
+    description: >-
+      Lowest severity to report in create-issues mode: CRITICAL | HIGH | MEDIUM | LOW.
+      Findings below the floor are dropped (and below-floor issues auto-closed).
+      Empty or unrecognised defaults to LOW (report everything).
+    required: false
+    default: ""
 
   # ── create-issues mode — findings artifact paths ────────────────────────────
   semgrep-findings:
@@ -113,6 +120,7 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ inputs.repo }}
         RUN_URL: ${{ inputs.run-url }}
+        SEVERITY_FLOOR: ${{ inputs.severity-floor }}
         # create-issues — findings artifact paths
         SEMGREP_FINDINGS: ${{ inputs.semgrep-findings }}
         TRIVY_FS_FINDINGS: ${{ inputs.trivy-fs-findings }}
