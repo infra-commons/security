@@ -70,6 +70,15 @@ jobs:
     name: Evaluate + auto-merge eligible churn
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The workflow-level `permissions: {}` above caps every job to zero perms by
+    # default, so the token this job actually gets must be granted HERE (a reusable
+    # workflow's jobs do NOT inherit the caller's permissions past a workflow-level
+    # `permissions:` declaration). Without this the very first `gh pr view` fails
+    # with "resource not accessible by integration". Still capped by the caller's
+    # own grant, so a caller that grants less than this simply gets less.
+    permissions:
+      contents: write        # enable native auto-merge / squash
+      pull-requests: write   # read PR files/labels, approve, enable auto-merge
     # Only bot authors can ever be eligible — cheap pre-filter so human PRs skip
     # the job entirely. The script re-checks the full author allowlist too.
     if: >-
