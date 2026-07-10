@@ -61,6 +61,14 @@ on:
         type: string
         required: false
         default: ""
+      severity_floor:
+        description: >-
+          Lowest severity to open issues for: CRITICAL | HIGH | MEDIUM | LOW.
+          Findings below the floor are dropped and below-floor issues auto-closed.
+          Empty defaults to LOW (report everything — historical behaviour).
+        type: string
+        required: false
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: false   # not needed unless run_ai_review is true
@@ -377,6 +385,7 @@ jobs:
           github-token: ${{ github.token }}
           repo: ${{ github.repository }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          severity-floor: ${{ inputs.severity_floor }}
           semgrep-findings: _artifacts/semgrep/semgrep-findings.json
           trivy-fs-findings: _artifacts/trivy/trivy-fs.json
           trivy-image-findings: _artifacts/trivy/trivy-image.json
