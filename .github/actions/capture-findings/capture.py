@@ -468,8 +468,13 @@ def ensure_labels(token: str, repo: str) -> None:
                 resp.raise_for_status()
 
 
-def open_issue_titles(token: str, repo: str) -> set[str]:
-    titles: set[str] = set()
+def open_security_issues(token: str, repo: str) -> dict[str, dict]:
+    """Open `security`-labelled issues keyed by exact title (for find-or-update).
+
+    The GitHub issues endpoint also returns pull requests; the `security` label
+    filter excludes them in practice, but skip any that slip through defensively.
+    """
+    issues: dict[str, dict] = {}
     with httpx.Client(timeout=_TIMEOUT) as client:
         page = 1
         while True:
@@ -480,11 +485,14 @@ def open_issue_titles(token: str, repo: str) -> set[str]:
             )
             resp.raise_for_status()
             batch = resp.json()
-            titles.update(i["title"] for i in batch)
+            for issue in batch:
+                if "pull_request" in issue:
+                    continue
+                issues[issue["title"]] = issue
             if len(batch) < 100:
                 break
             page += 1
-    return titles
+    return issues
 
 
 def closed_suppressed_keys(token: str, repo: str) -> set[str]:
@@ -544,6 +552,15 @@ def create_issue(token: str, repo: str, title: str, body: str, labels: list[str]
         ).raise_for_status()
 
 
+def update_issue_body(token: str, repo: str, number: int, body: str) -> None:
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        client.patch(
+            f"{GITHUB_API}/repos/{repo}/issues/{number}",
+            headers=_headers(token),
+            json={"body": body[:65_000]},
+        ).raise_for_status()
+
+
 def issue_title(finding: dict) -> str:
     return (
         f"[Security][adversarial-ai][{finding['severity']}] "
@@ -568,6 +585,121 @@ def issue_body(finding: dict, merge_sha: str, repo: str, run_url: str) -> str:
         "_Close this issue when the finding is fixed, or add an entry to "
         "`.github/adversarial-review-suppressions.yml` if it is a false positive._",
     ])
+
+
+# ── MEDIUM/LOW rolling digest ────────────────────────────────────────────────────
+#
+# CRITICAL/HIGH findings are filed as individual issues — they gate the merge and
+# need discrete tracking. MEDIUM/LOW findings instead accumulate into a single
+# rolling digest issue, updated in place, so routine lower-severity findings do
+# not flood the tracker. This mirrors the aggregate pattern in the
+# weekly-security-scan action, adapted for per-merge capture: because each run
+# only sees the current merge's diff, new rows are APPENDED to the existing
+# digest (deduplicated by location) rather than replacing it wholesale.
+
+# Only these two severities become individual issues; the rest roll into the digest.
+_INDIVIDUAL_SEVERITIES = {"CRITICAL", "HIGH"}
+
+# Fixed title = the find-or-update key for the rolling digest (matched exactly,
+# the same way weekly-security-scan matches its aggregate issue by title).
+DIGEST_TITLE = "[Security][adversarial-ai] MEDIUM/LOW findings digest"
+
+# Recover the location cell from an existing digest table row, for append-dedup.
+# Locations are sanitised (backticks/pipes escaped) before they reach a row, so
+# the only backticks on the line are the wrappers this module adds.
+_DIGEST_ROW_RE = re.compile(r'(?m)^\|\s*(?:MEDIUM|LOW)\s*\|\s*`([^`]+)`\s*\|')
+
+
+def digest_row(finding: dict) -> str:
+    return (
+        f"| {finding['severity']} | `{finding['location']}` | "
+        f"{finding['title']} | {datetime.now(timezone.utc).strftime('%Y-%m-%d')} |"
+    )
+
+
+def existing_digest_locations(body: str) -> set[str]:
+    """Locations already listed in a digest issue body."""
+    return set(_DIGEST_ROW_RE.findall(body or ""))
+
+
+def existing_digest_rows(body: str) -> list[str]:
+    """The digest table's existing data rows, preserved verbatim on append."""
+    rows: list[str] = []
+    for line in (body or "").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        if s.lower().startswith("| severity") or set(s) <= set("| -"):
+            continue  # header or separator row
+        rows.append(s)
+    return rows
+
+
+def build_digest_body(rows: list[str], run_url: str) -> str:
+    return "\n".join([
+        "## MEDIUM / LOW security findings (rolling digest)",
+        "",
+        "Lower-severity findings captured from merged diffs by the `adversarial-ai` "
+        "review. CRITICAL/HIGH findings are filed as individual issues; these roll "
+        "up here to keep the tracker readable. Fix a finding and delete its row, or "
+        "add a `.github/adversarial-review-suppressions.yml` entry if it is a false "
+        "positive.",
+        "",
+        "| Severity | Location | Finding | Captured |",
+        "| --- | --- | --- | --- |",
+        *rows,
+        "",
+        "---",
+        f"_Rolling digest maintained by the [capture-findings workflow]({run_url}). "
+        f"Last updated {datetime.now(timezone.utc).strftime('%Y-%m-%d')}._",
+    ])
+
+
+def upsert_digest(
+    token: str,
+    repo: str,
+    open_issues: dict[str, dict],
+    suppressed_closed: set[str],
+    new_findings: list[dict],
+    run_url: str,
+) -> tuple[int, int]:
+    """Create or update the rolling MEDIUM/LOW digest.
+
+    Returns (issues_created, rows_added). New rows are appended to the existing
+    digest, deduplicated by location so re-merging the same code does not
+    double-list a finding.
+    """
+    existing_issue = open_issues.get(DIGEST_TITLE)
+    if existing_issue is None and DIGEST_TITLE in suppressed_closed:
+        print("  Digest issue is closed as not-planned/wont-fix — not re-creating.")
+        return 0, 0
+
+    prior_body = (existing_issue or {}).get("body") or ""
+    seen = existing_digest_locations(prior_body)
+    prior_rows = existing_digest_rows(prior_body)
+
+    added_rows: list[str] = []
+    for finding in new_findings:
+        if finding["location"] in seen:
+            print(f"  Digest already lists: {finding['location']}")
+            continue
+        seen.add(finding["location"])
+        added_rows.append(digest_row(finding))
+        print(f"  Digesting [{finding['severity']}] {finding['location']}")
+
+    if not added_rows:
+        print("  No new MEDIUM/LOW findings for the digest.")
+        return 0, 0
+
+    body = build_digest_body(prior_rows + added_rows, run_url)
+    if existing_issue:
+        update_issue_body(token, repo, existing_issue["number"], body)
+        print(f"  Updated digest issue #{existing_issue['number']} (+{len(added_rows)} finding(s))")
+        return 0, len(added_rows)
+
+    create_issue(token, repo, DIGEST_TITLE, body, ["security", "source:adversarial-ai"])
+    print(f"  Created digest issue with {len(added_rows)} finding(s)")
+    return 1, len(added_rows)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -628,7 +760,8 @@ def main() -> None:
         return
 
     ensure_labels(token, repo)
-    existing = open_issue_titles(token, repo)
+    open_issues = open_security_issues(token, repo)
+    existing = set(open_issues)
     print(f"  {len(existing)} open security issue(s) — deduplicating against them")
     # Secondary dedup key: severity+location prefix before the LLM-generated title
     # suffix. An injected title alone cannot suppress a finding — the injected
@@ -645,9 +778,11 @@ def main() -> None:
     created = 0
     criticals_new = 0
     criticals_already_tracked = 0
+    digest_findings: list[dict] = []  # MEDIUM/LOW findings to roll into the digest
     for finding in kept:
         raw_sev = str(finding.get("severity", "")).upper()
         sev = raw_sev if raw_sev in _VALID_SEVERITIES else "LOW"
+        finding["severity"] = sev  # normalise so titles/digest rows use the validated value
         title = issue_title(finding)
         loc_key = _location_key(title)
         if title in suppressed_closed or (loc_key and loc_key in suppressed_closed):
@@ -663,6 +798,9 @@ def main() -> None:
                     file=sys.stderr,
                 )
             continue
+        if sev not in _INDIVIDUAL_SEVERITIES:
+            digest_findings.append(finding)
+            continue
         labels = ["security", f"severity:{sev.lower()}", "source:adversarial-ai"]
         body = issue_body(finding, after, repo, run_url)
         print(f"  Creating [{sev}] {title[:80]}")
@@ -671,9 +809,16 @@ def main() -> None:
         if sev == "CRITICAL":
             criticals_new += 1
         time.sleep(1)
+
+    digest_issues, digest_rows = upsert_digest(
+        token, repo, open_issues, suppressed_closed, digest_findings, run_url
+    )
+
     criticals_total = criticals_new + criticals_already_tracked
     print(
-        f"Done. Captured {created} new finding(s). "
+        f"Done. Filed {created} individual issue(s); "
+        f"digested {digest_rows} new MEDIUM/LOW finding(s)"
+        f"{' (new digest issue)' if digest_issues else ''}. "
         f"CRITICALs: {criticals_new} new, {criticals_already_tracked} already tracked."
     )
     if criticals_total:
