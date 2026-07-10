@@ -71,23 +71,33 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
 | `tier-a.yml` / `tier-b.yml` / `tier-c.yml` | Tiered security posture bundles |
 
-#### `capture-findings-reusable.yml` internal pin — moving tag, not a raw SHA
+#### Reusables' internal composite pins — per-family moving tags, not raw SHAs
 
-Unlike every other `uses:` in this repo, the reusable's own composite-action pin
-(`infra-commons/security/.github/actions/capture-findings@capture-findings/v1`) is
-pinned to a **moving major tag**, not a 40-char SHA — `pin-check.yml` carries a narrow,
-deliberate exception for it (see `.github/scripts/check-action-pins.sh`). This is the
-one internal pin we own end-to-end, so the risk a SHA pin protects against (a
-third party rewriting history under us) doesn't apply.
+Unlike every other `uses:` in this repo, each reusable's own composite-action pin is
+pinned to a **per-family moving major tag** rather than a 40-char SHA:
 
-**To ship a `capture.py` fix:** cut a new immutable release tag (`capture-findings/vX.Y.Z`)
-on the commit with the fix, then move `capture-findings/v1` to point at it —
+| Composite | Moving pin |
+|---|---|
+| `.github/actions/adversarial-review` | `@adversarial-review/v1` |
+| `.github/actions/capture-findings` | `@capture-findings/v1` |
+| `.github/actions/daily-health-check` | `@daily-health-check/v1` |
+| `.github/actions/suppression-audit` | `@suppression-audit/v1` |
+| `.github/actions/weekly-security-scan` | `@weekly-security-scan/v1` |
+
+`pin-check.yml` carries a narrow, deliberate exception for own-repo `.github/actions/*`
+refs on a `<family>/vN` tag (see `.github/scripts/check-action-pins.sh`); our own
+*reusable-workflow* calls and every third-party `uses:` still require an immutable SHA.
+These are the internal pins we own end-to-end, so the risk a SHA pin protects against
+(a third party rewriting history under us) doesn't apply.
+
+**To ship a composite fix:** cut a new immutable release tag (`<family>/vX.Y.Z`) on the
+commit with the fix, then move `<family>/v1` to point at it — e.g.
 `git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`.
-That's it: **zero** edits to `capture-findings-reusable.yml` or any consumer. Every
-caller that pins the reusable at a post-adoption SHA (or `@main`) picks up the fix on
-its next run. This replaces the old failure mode (2026-07-02, PRs #20/#21) where the
-reusable's inner pin silently lagged a `capture.py` fix because bumping it was a
-separate, easy-to-forget manual step.
+That's it: **zero** edits to the reusable or any consumer. Every caller that pins the
+reusable at a post-adoption SHA (or `@main`) picks up the fix on its next run. This
+replaces the old failure mode (2026-07-02, PRs #20/#21) where a reusable's inner SHA pin
+silently lagged a composite fix because bumping it was a separate, easy-to-forget manual
+step — and it removes the per-composite SHA-bump churn that motivated this change.
 
 ## `pentest/` — internal penetration-test toolkit
 

@@ -24,7 +24,7 @@ name: Capture legal findings (reusable)
 #
 #   jobs:
 #     capture:
-#       uses: rolliq-shared-infra/security/.github/workflows/legal-capture-findings-reusable.yml@<SHA>
+#       uses: infra-commons/security/.github/workflows/legal-capture-findings-reusable.yml@<SHA>
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #

@@ -8,10 +8,12 @@
 # them. This guard keeps every internal reference SHA-pinned so a caller's pin is real.
 #
 # Allowed without a SHA: local `./` refs, digest-pinned `docker://...@sha256:` images, and
-# own-repo refs pinned to a `capture-findings/vN...` version tag — the one deliberate,
-# scoped relaxation: capture-findings ships fixes by moving `capture-findings/v1` (see
-# README), so its internal pin is intentionally NOT a raw SHA. Every third-party and
-# cross-repo `uses:` still requires a 40-char SHA.
+# own-repo *composite-action* refs pinned to a per-family `<family>/vN...` moving tag
+# (e.g. `.github/actions/adversarial-review@adversarial-review/v1`) — the one deliberate,
+# scoped relaxation: each composite we own end-to-end ships fixes by moving its `<family>/v1`
+# tag (see README), so its internal pin is intentionally NOT a raw SHA. Note this exempts
+# only `.github/actions/*` refs; our own *reusable-workflow* calls still require a 40-char
+# SHA, as does every third-party and cross-repo `uses:`.
 # Runs in CI (pin-check.yml) and locally: `bash .github/scripts/check-action-pins.sh`.
 set -euo pipefail
 
@@ -22,7 +24,7 @@ while IFS= read -r raw; do
   ref="$(printf '%s' "$ref" | tr -d "\"'" | xargs)"    # trim quotes/whitespace
   case "$ref" in
     ./*|docker://*@sha256:*) continue ;;
-    infra-commons/security/*@capture-findings/v[0-9]*) continue ;;
+    infra-commons/security/.github/actions/*@*/v[0-9]*) continue ;;
     *@*)
       tail="${ref##*@}"
       if ! printf '%s' "$tail" | grep -qE '^[0-9a-f]{40}$'; then

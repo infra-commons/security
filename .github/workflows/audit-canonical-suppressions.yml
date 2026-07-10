@@ -1,0 +1,47 @@
+name: Audit canonical suppressions
+
+# Scheduled expiry audit of THIS repo's own canonical, platform-wide
+# suppressions file (.github/adversarial-review-suppressions.yml) — the 12-entry
+# list applied to every entity-org repo that calls our reusable workflows.
+#
+# Every consumer repo already audits its own repo-local suppressions via the
+# `suppression-audit` job in weekly-security-scan-reusable.yml, but nothing was
+# auditing the canonical file itself, so an expired canonical entry could sit
+# unnoticed. This workflow closes that gap: it files (and auto-closes) a single
+# idempotent "Security: suppression expiry audit" issue in infra-commons/security.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC, weekly
+  workflow_dispatch:
+  # Also re-audit whenever the canonical file changes on main, so a newly-added
+  # already-expired entry is flagged immediately rather than up to a week later.
+  push:
+    branches: [main]
+    paths:
+      - '.github/adversarial-review-suppressions.yml'
+
+concurrency:
+  group: audit-canonical-suppressions
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  suppression-audit:
+    name: Canonical suppression expiry audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: infra-commons/security/.github/actions/suppression-audit@suppression-audit/v1
+        with:
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          suppressions-path: .github/adversarial-review-suppressions.yml

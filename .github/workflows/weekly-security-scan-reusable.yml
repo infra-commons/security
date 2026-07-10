@@ -175,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
         with:
           mode: ai-review
           scan-chunk: app
@@ -222,7 +222,7 @@ jobs:
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/secrets
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
         with:
           mode: ai-review
           scan-chunk: infra
@@ -267,7 +267,7 @@ jobs:
           token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/secrets
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
         with:
           mode: ai-review
           scan-chunk: cicd
@@ -371,7 +371,7 @@ jobs:
           path: _artifacts/gitleaks
         continue-on-error: true
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
         with:
           mode: create-issues
           github-token: ${{ github.token }}
@@ -397,7 +397,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - uses: infra-commons/security/.github/actions/suppression-audit@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
+      - uses: infra-commons/security/.github/actions/suppression-audit@suppression-audit/v1
         with:
           github-token: ${{ github.token }}
           repo: ${{ github.repository }}
