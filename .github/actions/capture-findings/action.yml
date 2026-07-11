@@ -23,6 +23,14 @@ inputs:
   run-url:
     description: "URL of the current workflow run"
     required: true
+  severity-floor:
+    description: >-
+      Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that gets an individual
+      GitHub Issue; findings below it roll into the rolling MEDIUM/LOW digest
+      instead. Empty defaults to HIGH (CRITICAL+HIGH individual, MEDIUM+LOW
+      digest — the historical behaviour).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -49,4 +57,5 @@ runs:
         BEFORE_SHA: ${{ inputs.before-sha }}
         AFTER_SHA: ${{ inputs.after-sha }}
         RUN_URL: ${{ inputs.run-url }}
+        INDIVIDUAL_SEVERITY_FLOOR: ${{ inputs.severity-floor }}
       run: python "$GITHUB_ACTION_PATH/capture.py"

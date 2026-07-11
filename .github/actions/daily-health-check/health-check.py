@@ -624,6 +624,74 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
     }
 
 
+# ── Auto-merged-in-last-24h visibility (Plan 1c) ───────────────────────────────
+#
+# Read-only reporting section: this NEVER merges or approves anything itself —
+# the actual merging happens in triage_dependabot_prs() above (this same run) and
+# in the separate auto-merge-churn workflow (a different run entirely, on its
+# own pull_request_target trigger). This just surfaces, in one daily digest,
+# everything that left Kevin's review queue on its own in the lookback window,
+# so "what got auto-merged while I wasn't looking" has a single answer.
+#
+# Detection is by review body, not by author: both auto-merge-churn and this
+# health check's own Dependabot lane leave a distinctive "Auto-approved by ..."
+# review body (see auto-merge-churn.py and triage_dependabot_prs() above), so a
+# merged PR carrying one of those reviews was auto-approved, not human-reviewed.
+
+_CHURN_APPROVAL_RE      = re.compile(r"^Auto-approved by auto-merge-churn", re.IGNORECASE)
+_DEPENDABOT_APPROVAL_RE = re.compile(r"^Auto-approved by the daily health-check", re.IGNORECASE)
+
+
+def find_auto_merged_last_24h(repo: str, lookback_hours: int) -> dict:
+    """Report PRs merged in the lookback window that carry an auto-merge-churn
+    or daily-health-check auto-approval review, i.e. left the queue without a
+    human review. Best-effort: a `gh` failure yields an empty (not fatal) result.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    prs = _gh_json(
+        "pr", "list",
+        "--repo", repo,
+        "--state", "merged",
+        "--json", "number,title,url,mergedAt",
+        "--limit", "50",
+    )
+    if not isinstance(prs, list):
+        prs = []
+
+    recent = []
+    for pr in prs:
+        merged_at = pr.get("mergedAt") or ""
+        try:
+            ts = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts >= cutoff:
+            recent.append(pr)
+
+    churn: list[dict] = []
+    dependabot: list[dict] = []
+    for pr in recent:
+        number = pr["number"]
+        detail = _gh_json(
+            "pr", "view", str(number), "--repo", repo, "--json", "reviews",
+        )
+        reviews = detail.get("reviews", []) if isinstance(detail, dict) else []
+        bodies = [r.get("body", "") or "" for r in reviews]
+        entry = {"number": number, "title": pr["title"], "url": pr["url"]}
+        if any(_CHURN_APPROVAL_RE.match(b) for b in bodies):
+            churn.append(entry)
+        elif any(_DEPENDABOT_APPROVAL_RE.match(b) for b in bodies):
+            dependabot.append(entry)
+
+    return {
+        "lookback_hours": lookback_hours,
+        "churn": churn,
+        "dependabot": dependabot,
+        "total": len(churn) + len(dependabot),
+    }
+
+
 # ── Workflow failure triage ────────────────────────────────────────────────────
 
 def _find_workflow_file(workflow_name: str) -> str | None:
@@ -838,11 +906,12 @@ def main() -> None:
     )
 
     summary: dict = {
-        "repo":               args.repo,
-        "run_url":            args.run_url,
-        "dry_run":            args.dry_run,
-        "dependabot":         {},
-        "workflow_failures":  {},
+        "repo":                 args.repo,
+        "run_url":              args.run_url,
+        "dry_run":              args.dry_run,
+        "dependabot":           {},
+        "auto_merged_last_24h": {},
+        "workflow_failures":    {},
     }
 
     if args.merge_dependabot:
@@ -855,6 +924,16 @@ def main() -> None:
             f"skipped_major={dep['skipped_major']} | "
             f"errors={dep['errors']}\n"
         )
+
+    print("── Auto-merged in last 24h ───────────────────────────────────────────")
+    auto_merged = find_auto_merged_last_24h(args.repo, args.lookback_hours)
+    summary["auto_merged_last_24h"] = auto_merged
+    print(f"  churn={len(auto_merged['churn'])} | dependabot={len(auto_merged['dependabot'])}")
+    for pr in auto_merged["churn"]:
+        print(f"    [churn]      #{pr['number']}: {pr['title']}")
+    for pr in auto_merged["dependabot"]:
+        print(f"    [dependabot] #{pr['number']}: {pr['title']}")
+    print()
 
     print("── Workflow failures ─────────────────────────────────────────────────")
     wf = triage_failed_runs(

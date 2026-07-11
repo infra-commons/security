@@ -1,0 +1,52 @@
+name: Auto-merge churn (evaluate + enable)
+description: >-
+  Evaluates whether a single PR is a low-risk, bot-authored churn PR (a
+  sync-managed file or an autofix:security-labelled PR) and, if eligible,
+  approves it and enables native auto-merge. Wrapped as a composite action
+  so a fix to the eligibility logic ships by moving the auto-merge-churn/v1
+  tag (see README) — the same recipe every other reusable in this repo
+  uses — with zero edit to the reusable workflow or any consumer.
+
+inputs:
+  github-token:
+    description: >-
+      Token used to approve the PR and enable auto-merge. Should be an App
+      token distinct from the PR author when possible (GITHUB_TOKEN cannot
+      approve, and the bot PR authors cannot approve their own PRs) — the
+      caller resolves that and passes whichever token it has.
+    required: true
+  repo:
+    description: "owner/repo slug"
+    required: true
+  pr-number:
+    description: "Pull request number to evaluate"
+    required: true
+  pr-author:
+    description: "Login of the PR author"
+    required: true
+  run-url:
+    description: "Workflow-run URL to include in the approval comment"
+    required: false
+    default: ""
+  allowed-globs:
+    description: >-
+      Extra newline-separated path globs to treat as auto-mergeable, ON TOP
+      of the built-in suppressions + confidential-terms allowlist. Files
+      under a hard-exclusion (.github/workflows/**, rulesets, CODEOWNERS)
+      are never eligible regardless.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Evaluate eligibility and enable auto-merge
+      shell: bash
+      env:
+        GH_TOKEN:      ${{ inputs.github-token }}
+        GH_REPO:       ${{ inputs.repo }}
+        PR_NUMBER:     ${{ inputs.pr-number }}
+        PR_AUTHOR:     ${{ inputs.pr-author }}
+        RUN_URL:       ${{ inputs.run-url }}
+        ALLOWED_GLOBS: ${{ inputs.allowed-globs }}
+      run: python3 "$GITHUB_ACTION_PATH/auto-merge-churn.py"
