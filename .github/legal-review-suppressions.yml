@@ -143,3 +143,63 @@ suppressions:
     file_pattern: "\\.trivyignore"
     finding_pattern: "(AVD-AZU-0012|suppression removed|re.?enabl(ed|ing)).{0,80}(scan|scanned|public network access)"
     reason: ".trivyignore suppression removal (re-enabling a scan) is an improvement, not a new risk."
+
+  # ── Issue-sweep 2026-07-11: accepted/disclosed legal-ai classes (wont-fix) ─────
+  # Each entry is scoped by file + finding text so it settles only the specific
+  # accepted class and does not mask genuine future legal items at the same path.
+
+  - id: microsoft-graph-customer-tenant-not-new-subprocessor
+    file_pattern: '(templates/dpa\.md|.*/dpa\.md)'
+    finding_pattern: '(microsoft graph|graph api)[^\n]{0,160}(sub.?processor|consent|disclos)'
+    reason: "For Microsoft-stack deployments the Graph API operates within the customer's own Microsoft 365 tenant (their system of record), delivering to the customer's own SharePoint; it is not a new external sub-processor introduced by Rolliq. Disclosed, accepted architecture, maintained in the DPA sub-processor list and privacy notice."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: self-operated-dpa-onboarding-check-process-control
+    file_pattern: 'docs/onboarding-checklist\.md'
+    finding_pattern: 'self.?operated[^\n]{0,180}(dpa|coverage|compliance|handover|manual|enforc)'
+    reason: "The self-operated handover / DPA-coverage check is a documented onboarding process control, not a schema-enforced deploy gate. No client is self-operated today and the schema already requires self-operated to imply client-owned infrastructure. Adding a hard schema gate is tracked as clients-config#177."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: sharepoint-site-id-non-secret-identifier
+    file_pattern: 'clients/.*\.ya?ml'
+    finding_pattern: '(sharepoint.?site.?id|site.?id)[^\n]{0,180}(hardcoded|topology|structural identifier|exposes|plaintext)'
+    reason: "A SharePoint site ID is a non-secret routing identifier (comparable to an Azure resource ID). Access is gated by the Graph Sites.Selected grant and the per-site managed-identity permission, not by obscurity of the ID; the entry concerned is Rolliq's own sandbox site holding synthetic data."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: model-name-in-solution-yaml-not-ip-copyright-risk
+    file_pattern: 'SOLUTION\.ya?ml'
+    finding_pattern: '(gpt|model)[^\n]{0,150}(ip|copyright)[^\n]{0,80}(risk|output|undisclosed)'
+    reason: "Naming the inference model in SOLUTION.yaml is configuration metadata, not an IP or copyright exposure. AI-generated output is produced under the client DPA and delivered to the client; model licensing is governed by the provider terms (Azure OpenAI or Anthropic), already accepted."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: candidate-erasure-payload-search-hardened
+    file_pattern: 'scripts/delete-client-data\.py'
+    finding_pattern: '(candidate.?scoped|erasure|payload text search|ilike)[^\n]{0,180}(over.?delet|under.?delet|imprecise|precision)'
+    reason: "webhook_events has no candidate_name column, so candidate-scoped erasure matches the raw payload text. The match now escapes ILIKE metacharacters so a name cannot wildcard-match unrelated rows, and it is bounded by client_id scoping; the residual substring imprecision is inherent to searching a schemaless payload and is accepted."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: webhook-ledger-null-retain-until-aged-by-created-at
+    file_pattern: 'src/storage/webhook_ledger\.py'
+    finding_pattern: '(retain_until|retention)[^\n]{0,180}(null|no defined|no maximum|indefinit)'
+    reason: "Rows with a NULL retain_until are aged out on created_at + retention_days (the same rule applied to pre-stamp blobs), so there is no indefinite-retention path for webhook_events. Enforcement/enablement status is tracked in the ADR-0006 issues."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: capture-findings-audit-comment-no-customer-pii
+    file_pattern: '\.github/workflows/capture-findings\.yml'
+    finding_pattern: '(audit comment|findings)[^\n]{0,180}(pii|candidate|referee)[^\n]{0,90}(retention|no.{0,20}control)'
+    reason: "The capture-findings audit comment records finding metadata (file, severity, short description) from the merged diff, not candidate or referee records. Review prompts are instructed not to echo PII, and findings live in the repo issue tracker under the same access controls as the code; no customer PII store is created here."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
+
+  - id: single-operator-approval-compensated-solo-shop
+    file_pattern: 'docs/.*provision.*\.md'
+    finding_pattern: '(single.?operator|one operator|solo)[^\n]{0,180}(approv|oversight|segregation|second.?person)'
+    reason: "Segregation of duties between operator and approver is not currently possible in a single-operator company. Compensating controls are documented (recorded pre-session authorization, before/after checklist, least-privilege time-boxed elevation removed at session end), and the structural fix is the tracked foundry-deployment Terraform module that removes manual tenant access."
+    added: "2026-07-11"
+    added_by: "kev@rolliq.com"
