@@ -29,6 +29,12 @@ Required env vars:
   BEFORE_SHA       commit SHA before the push (github.event.before)
   AFTER_SHA        commit SHA after the push  (github.event.after)
   RUN_URL          URL of the current workflow run
+
+Optional env vars:
+  INDIVIDUAL_SEVERITY_FLOOR   Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that
+                              gets an individual issue; below it, findings roll
+                              into the rolling MEDIUM/LOW digest instead.
+                              Empty/unset defaults to HIGH (historical behaviour).
 """
 import json
 import os
@@ -597,8 +603,23 @@ def issue_body(finding: dict, merge_sha: str, repo: str, run_url: str) -> str:
 # only sees the current merge's diff, new rows are APPENDED to the existing
 # digest (deduplicated by location) rather than replacing it wholesale.
 
-# Only these two severities become individual issues; the rest roll into the digest.
-_INDIVIDUAL_SEVERITIES = {"CRITICAL", "HIGH"}
+# Severities that become individual issues vs. roll into the digest are governed
+# by a floor: severities AT OR ABOVE the floor are individual, the rest digest.
+# Configurable via the INDIVIDUAL_SEVERITY_FLOOR env var (workflow_call input
+# `severity_floor`, plumbed through capture-findings-reusable.yml); empty/unset
+# defaults to "HIGH" — CRITICAL+HIGH individual, MEDIUM+LOW digest — which is the
+# historical, hardcoded behaviour this floor replaces.
+_SEVERITY_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+_DEFAULT_INDIVIDUAL_FLOOR = "HIGH"
+
+
+def individual_severities(floor: str) -> set[str]:
+    """Return the set of severities (>= floor) that get individual issues."""
+    floor = (floor or "").strip().upper()
+    if floor not in _SEVERITY_ORDER:
+        floor = _DEFAULT_INDIVIDUAL_FLOOR
+    idx = _SEVERITY_ORDER.index(floor)
+    return set(_SEVERITY_ORDER[idx:])
 
 # Fixed title = the find-or-update key for the rolling digest (matched exactly,
 # the same way weekly-security-scan matches its aggregate issue by title).
@@ -711,6 +732,7 @@ def main() -> None:
     before = os.environ.get("BEFORE_SHA", "")
     after = os.environ.get("AFTER_SHA", "")
     run_url = os.environ.get("RUN_URL", "")
+    individual_floor = individual_severities(os.environ.get("INDIVIDUAL_SEVERITY_FLOOR", ""))
 
     missing = [k for k, v in {
         "REVIEW_API_KEY": api_key, "GITHUB_TOKEN": token,
@@ -798,7 +820,7 @@ def main() -> None:
                     file=sys.stderr,
                 )
             continue
-        if sev not in _INDIVIDUAL_SEVERITIES:
+        if sev not in individual_floor:
             digest_findings.append(finding)
             continue
         labels = ["security", f"severity:{sev.lower()}", "source:adversarial-ai"]

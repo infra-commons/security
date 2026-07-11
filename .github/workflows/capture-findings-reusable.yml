@@ -21,6 +21,8 @@ name: Capture security findings (reusable)
 #   jobs:
 #     capture:
 #       uses: infra-commons/security/.github/workflows/capture-findings-reusable.yml@<SHA>
+#       with:
+#         severity_floor: HIGH   # optional; empty/omitted defaults to HIGH (historical)
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #
@@ -33,6 +35,16 @@ permissions: {}
 
 on:
   workflow_call:
+    inputs:
+      severity_floor:
+        description: >-
+          Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that gets an individual
+          GitHub Issue; findings below it roll into the rolling MEDIUM/LOW
+          digest instead. Empty defaults to HIGH — CRITICAL+HIGH individual,
+          MEDIUM+LOW digest — the historical, previously-hardcoded behaviour.
+        type: string
+        required: false
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -59,3 +71,4 @@ jobs:
           before-sha: ${{ github.event.before }}
           after-sha: ${{ github.event.after }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          severity-floor: ${{ inputs.severity_floor }}

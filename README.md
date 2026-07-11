@@ -67,8 +67,9 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 | `legal-review-reusable.yml` | AI legal clause review on PRs |
 | `legal-capture-findings-reusable.yml` | Post-merge capture of legal findings as GitHub Issues |
 | `secret-scan-reusable.yml` | Gitleaks secret scanning |
-| `daily-health-check-reusable.yml` | Daily repo health check |
+| `daily-health-check-reusable.yml` | Daily repo health check (Dependabot triage, failed-run diagnosis, auto-merged-in-last-24h visibility) |
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
+| `auto-merge-churn-reusable.yml` | Auto-approve + enable auto-merge for low-risk bot churn PRs (Plan 1c) |
 | `tier-a.yml` / `tier-b.yml` / `tier-c.yml` | Tiered security posture bundles |
 
 #### Reusables' internal composite pins — per-family moving tags, not raw SHAs
@@ -79,6 +80,7 @@ pinned to a **per-family moving major tag** rather than a 40-char SHA:
 | Composite | Moving pin |
 |---|---|
 | `.github/actions/adversarial-review` | `@adversarial-review/v1` |
+| `.github/actions/auto-merge-churn` | `@auto-merge-churn/v1` |
 | `.github/actions/capture-findings` | `@capture-findings/v1` |
 | `.github/actions/daily-health-check` | `@daily-health-check/v1` |
 | `.github/actions/suppression-audit` | `@suppression-audit/v1` |

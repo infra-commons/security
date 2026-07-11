@@ -123,118 +123,19 @@ jobs:
         with:
           app-id: ${{ secrets.approve_app_id }}
           private-key: ${{ secrets.approve_app_private_key }}
-      - name: Evaluate eligibility and enable auto-merge
-        env:
+
+      # Wrapped as a composite (pinned to the auto-merge-churn/v1 moving tag, not a
+      # raw SHA — see README's "per-family moving tags" section) so a fix to the
+      # eligibility logic ships by moving that tag, matching every other reusable
+      # in this repo (capture-findings, daily-health-check, weekly-security-scan,
+      # suppression-audit). No reusable/consumer edit needed to pick up a fix.
+      - uses: infra-commons/security/.github/actions/auto-merge-churn@auto-merge-churn/v1
+        with:
           # App token (can approve) when configured; otherwise GITHUB_TOKEN, which
           # can read/enable-auto-merge but fails soft on the approve.
-          GH_TOKEN: ${{ steps.approver.outputs.token || github.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ALLOWED_GLOBS: ${{ inputs.allowed_globs }}
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, re, subprocess, sys
-
-          REPO   = os.environ["GH_REPO"]
-          NUM    = os.environ["PR_NUMBER"]
-          AUTHOR = os.environ["PR_AUTHOR"]
-          RUN    = os.environ.get("RUN_URL", "")
-
-          ALLOWED_AUTHORS = {"rolliqdotcom", "infra-commons-bot", "dependabot[bot]"}
-
-          # Hard exclusions — self-privilege-escalation surface. Never auto-merged
-          # even if an allowlist glob would otherwise match.
-          HARD_EXCLUDE = [
-              ".github/workflows/**",
-              "**/branch-rulesets.json", "branch-rulesets.json",
-              "**/CODEOWNERS", "CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS",
-              "scripts/apply-branch-rulesets.sh",
-          ]
-          # Built-in path allowlist — the low-risk sync-managed churn files.
-          DEFAULT_ALLOW = [
-              ".github/*-suppressions.yml",
-              ".github/confidential-terms-allow.txt",
-          ]
-          extra = [g.strip() for g in os.environ.get("ALLOWED_GLOBS", "").splitlines() if g.strip()]
-          ALLOW = DEFAULT_ALLOW + extra
-
-          def glob_to_re(pat: str) -> "re.Pattern":
-              # ** → any (incl. /); * → any except /; ? → single non-/.
-              out, i = ["^"], 0
-              while i < len(pat):
-                  if pat[i:i + 2] == "**":
-                      out.append(".*"); i += 2; continue
-                  c = pat[i]
-                  if c == "*":   out.append("[^/]*")
-                  elif c == "?": out.append("[^/]")
-                  else:          out.append(re.escape(c))
-                  i += 1
-              out.append("$")
-              return re.compile("".join(out))
-
-          HARD_RE  = [glob_to_re(p) for p in HARD_EXCLUDE]
-          ALLOW_RE = [glob_to_re(p) for p in ALLOW]
-
-          def gh_json(*args):
-              r = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
-              return json.loads(r.stdout)
-
-          def noop(reason: str) -> None:
-              print(f"auto-merge-churn: NO-OP — {reason}")
-              sys.exit(0)
-
-          # Belt-and-braces: never touch clients-config even if wired by mistake.
-          if REPO.split("/")[-1] == "clients-config":
-              noop("clients-config is excluded entirely")
-
-          if AUTHOR not in ALLOWED_AUTHORS:
-              noop(f"author {AUTHOR!r} not in allowlist")
-
-          data  = gh_json("pr", "view", NUM, "--repo", REPO, "--json", "files,labels")
-          files = [f["path"] for f in data.get("files", [])]
-          labels = {l["name"] for l in data.get("labels", [])}
-
-          if not files:
-              noop("no changed files reported")
-
-          hit = next((f for f in files for rx in HARD_RE if rx.match(f)), None)
-          if hit:
-              noop(f"guardrail: changed file {hit!r} is a hard-exclusion")
-
-          all_allowed = all(any(rx.match(f) for rx in ALLOW_RE) for f in files)
-          has_autofix = "autofix:security" in labels
-          if not (all_allowed or has_autofix):
-              offending = [f for f in files if not any(rx.match(f) for rx in ALLOW_RE)]
-              noop("not eligible — no autofix:security label and these files are "
-                   f"outside the allowlist: {offending}")
-
-          basis = "autofix:security label" if has_autofix else "all files within path allowlist"
-          print(f"auto-merge-churn: ELIGIBLE ({basis}) — approving #{NUM} in {REPO}")
-
-          # Approve (satisfies reviews:1; bot != PR author so it counts).
-          try:
-              subprocess.run(
-                  ["gh", "pr", "review", NUM, "--repo", REPO, "--approve", "--body",
-                   f"Auto-approved by auto-merge-churn ({basis}). "
-                   f"Required checks still gate the merge. Run: {RUN}"],
-                  capture_output=True, text=True, check=True)
-              print("  approved")
-          except subprocess.CalledProcessError as exc:
-              err = (exc.stderr or "").lower()
-              if "already" in err or "can't approve" in err or "cannot approve" in err:
-                  print("  already approved")
-              else:
-                  print(f"  WARNING: approval failed: {exc.stderr.strip()[:120]}", file=sys.stderr)
-
-          # Enable native auto-merge — merges only once required checks pass.
-          try:
-              subprocess.run(
-                  ["gh", "pr", "merge", NUM, "--repo", REPO, "--auto", "--squash"],
-                  capture_output=True, text=True, check=True)
-              print("  auto-merge enabled (squash)")
-          except subprocess.CalledProcessError as exc:
-              print(f"  WARNING: could not enable auto-merge: {exc.stderr.strip()[:120]}; "
-                    f"PR is approved — Kevin can merge manually", file=sys.stderr)
-          PYEOF
+          github-token: ${{ steps.approver.outputs.token || github.token }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ github.event.pull_request.number }}
+          pr-author: ${{ github.event.pull_request.user.login }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          allowed-globs: ${{ inputs.allowed_globs }}
