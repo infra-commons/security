@@ -102,3 +102,44 @@ suppressions:
       restating that accepted decision (e.g. in an ADR) is not itself a legal defect. A genuinely
       new transfer concern should be raised against the DPA/register, not re-filed per merge.
       Permanent.
+
+  # ── Batch-triage 2026-07-11 (rolliq-com decision lane) — settled legal-ai FP families ──
+  - id: security-review-generic-customer-phrasing
+    file_pattern: "SECURITY-REVIEW\\.md"
+    finding_pattern: "(microsoft.?aligned|azure ai foundry account).{0,100}(infer|identif|confidential)"
+    reason: "Generic customer-category phrasing in a security review doesn't identify the actual client."
+
+  - id: sandbox-staging-enablement-not-new-risk
+    file_pattern: "clients/sandbox\\.yaml"
+    finding_pattern: "(enabled_environments|staging).{0,80}(candidate pii|widens? (the )?surface|self.?attest)"
+    reason: "Enabling staging in clients/sandbox.yaml isn't a new risk on its own."
+
+  - id: security-doc-roadmap-disclosure
+    file_pattern: "docs/SECURITY\\.md"
+    finding_pattern: "(PIM|just.?in.?time|periodic (security )?(document )?review).{0,80}(roadmap|not yet configured|standing (process|commitment))"
+    reason: "docs/SECURITY.md honestly disclosing PIM/periodic-review as roadmap items is accurate self-disclosure, not a new risk."
+
+  - id: internal-doc-operational-notes
+    file_pattern: "docs/security-hardening-checklist\\.md"
+    finding_pattern: "(personal (work )?email|kev.{0,3}rolliq|claude.{0,40}(sign.?off|perform).{0,40}(security|hardening)|AI agent.{0,40}without.{0,40}human oversight)"
+    reason: "Owner email / AI-authored step notes in an internal ops doc are internal notes, not customer-facing risk."
+
+  - id: classify-call-name-verification-covered
+    file_pattern: "src/workflows/classify_call\\.py"
+    finding_pattern: "(candidate name|extract_candidate_name).{0,100}(without.{0,20}(explicit )?(human )?verification|human review)"
+    reason: "LLM-extracted candidate name is already covered by the existing human-in-the-loop recruiter review step."
+
+  - id: dependabot-comment-cosmetic-name
+    file_pattern: "\\.github/dependabot\\.yml"
+    finding_pattern: "(first name|named individual).{0,80}(comment|config)"
+    reason: "First name in a dependabot.yml config comment is cosmetic."
+
+  - id: steered-baseline-eval-fixture-not-live-behavior
+    file_pattern: "evals/cases/.*steered-baseline"
+    finding_pattern: "(recruiter steering|steering mechanism).{0,80}(eval|fixture|framing|emphasis)"
+    reason: "Recruiter steering mechanism in an eval fixture tests robustness, not a live production behavior."
+
+  - id: trivyignore-removal-is-improvement
+    file_pattern: "\\.trivyignore"
+    finding_pattern: "(AVD-AZU-0012|suppression removed|re.?enabl(ed|ing)).{0,80}(scan|scanned|public network access)"
+    reason: ".trivyignore suppression removal (re-enabling a scan) is an improvement, not a new risk."

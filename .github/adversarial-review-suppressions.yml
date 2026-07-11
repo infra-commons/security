@@ -134,3 +134,14 @@ suppressions:
       Additionally, the CRITICAL-findings gate job hard-blocks merges until a human resolves
       the finding — that is a mandatory documented oversight gate. The reviewer is incorrectly
       flagging its own review-posting architecture as lacking oversight. Permanent.
+
+  # ── Batch-triage 2026-07-11 (rolliq-com decision lane) — settled adversarial-ai FP families ─
+  - id: retention-audit-log-aggregate-counts-no-pii
+    file_pattern: "src/storage/retention\\.py"
+    finding_pattern: "(db_counts|blob_counts|audit log).{0,80}(table|container|schema|naming).{0,40}(leak|disclos|expos)"
+    reason: "Aggregate deletion counts in retention.py's audit log don't leak PII, table names only."
+
+  - id: security-review-template-example-verdict-correct
+    file_pattern: "docs/SECURITY-REVIEW\\.md"
+    finding_pattern: "(TEMPLATE-EXAMPLE|PASS-WITH-CONDITIONS).{0,100}(prod.?gate|production deploy|verdict|result)"
+    reason: "TEMPLATE-EXAMPLE label in docs/SECURITY-REVIEW.md is correct for the template repo, not a regression."
