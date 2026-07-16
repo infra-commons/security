@@ -23,7 +23,14 @@ name: Daily health check (reusable)
 #       with:
 #         dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
 #       secrets:
-#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         ANTHROPIC_API_KEY:       ${{ secrets.ANTHROPIC_API_KEY }}
+#         # Approver App (same identity the auto-merge-churn lane uses). REQUIRED
+#         # for minor/patch Dependabot PRs to actually auto-merge: GitHub forbids
+#         # the Actions GITHUB_TOKEN from approving, so without a distinct App the
+#         # approve fails soft and the PR waits for a human. Omit and Dependabot
+#         # triage still runs, just without the auto-approve.
+#         approve_app_id:          ${{ secrets.AUTOMERGE_APP_ID }}
+#         approve_app_private_key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
 #
 # Required caller permissions:
 #   contents:      write   (squash-merge Dependabot PRs via auto-merge)
@@ -60,6 +67,10 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: false   # Falls back to pattern-only diagnosis without it
+      approve_app_id:
+        required: false   # Approver App ID. Without it, Dependabot approvals fail soft.
+      approve_app_private_key:
+        required: false   # Approver App private key (PEM).
 
 jobs:
   health-check:
@@ -71,13 +82,34 @@ jobs:
       pull-requests: write
       actions:       write
       issues:        write
+    # `secrets` context is NOT available in a step `if:` (it fails workflow
+    # parsing with a startup_failure), but `env` IS — so hoist the presence
+    # check here and gate the mint step on env below.
+    env:
+      HAS_APPROVER_APP: ${{ secrets.approve_app_id != '' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Mint an installation token for the approver App so the Dependabot approve
+      # acts as a distinct identity — GitHub forbids the Actions GITHUB_TOKEN
+      # from approving PRs. Skipped when no App is configured; the action then
+      # gets an empty approve-token and the approve fails soft, as before.
+      - name: Mint approver App token
+        id: approver
+        if: ${{ env.HAS_APPROVER_APP == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id:      ${{ secrets.approve_app_id }}
+          private-key: ${{ secrets.approve_app_private_key }}
+
       - uses: infra-commons/security/.github/actions/daily-health-check@daily-health-check/v1
         with:
           github-token:      ${{ github.token }}
+          # Used ONLY to approve Dependabot PRs (github.token cannot). Empty when
+          # no App is wired → approve fails soft. Everything else — re-runs,
+          # issue filing, enabling auto-merge — stays on github.token above.
+          approve-token:     ${{ steps.approver.outputs.token }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           repo:              ${{ github.repository }}
           run-url:           ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
