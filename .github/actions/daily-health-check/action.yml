@@ -8,6 +8,15 @@ inputs:
   github-token:
     description: "GitHub token with pull-requests:write, actions:write, issues:write"
     required: true
+  approve-token:
+    description: >-
+      Token used ONLY to approve eligible Dependabot PRs. GitHub forbids the
+      default GITHUB_TOKEN from approving PRs, so pass a GitHub App installation
+      token (an identity distinct from the PR author) here. Optional — if empty,
+      the approve falls back to github-token and fails soft (the PR waits for a
+      human), preserving prior behaviour.
+    required: false
+    default: ""
   anthropic-api-key:
     description: "Anthropic API key for Claude Haiku triage (optional — falls back to pattern matching)"
     required: false
@@ -46,6 +55,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN:          ${{ inputs.github-token }}
+        APPROVE_TOKEN:     ${{ inputs.approve-token }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         REPO:              ${{ inputs.repo }}
         RUN_URL:           ${{ inputs.run-url }}

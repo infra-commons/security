@@ -93,11 +93,31 @@ Workflows: CI, security scans (Trivy, Semgrep, Gitleaks), CVE monitor, adversari
 
 # ── GitHub CLI helpers ─────────────────────────────────────────────────────────
 
-def _gh(*args: str, check: bool = True) -> str:
+def _gh(*args: str, check: bool = True, env: dict | None = None) -> str:
     result = subprocess.run(
         ["gh"] + list(args), capture_output=True, text=True, check=check,
+        env=env,
     )
     return result.stdout.strip()
+
+
+def _approver_env() -> dict | None:
+    """Environment for the Dependabot *approve* call only.
+
+    GitHub structurally forbids the Actions GITHUB_TOKEN from approving PRs
+    ("GitHub Actions is not permitted to approve pull requests"), so the daily
+    approve silently failed (errors=1 every run) and eligible Dependabot
+    minor/patch PRs never satisfied reviews:1 → auto-merge never armed → they
+    piled up for a human. When APPROVE_TOKEN is set (a GitHub App installation
+    token, minted by the reusable from a distinct approver App — the same App
+    the auto-merge-churn lane uses), run the approve as that identity so it
+    counts as a real review. Returns None when no dedicated token is provided,
+    in which case the approve uses the default GH_TOKEN and fails soft exactly
+    as before — so the fix is a no-op for any caller that doesn't wire the App."""
+    token = os.environ.get("APPROVE_TOKEN", "").strip()
+    if not token or token == os.environ.get("GH_TOKEN", "").strip():
+        return None
+    return {**os.environ, "GH_TOKEN": token}
 
 
 def _gh_json(*args: str) -> list | dict:
@@ -576,6 +596,16 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
 
     approved = skipped_major = errors = already_approved = 0
 
+    # The approve must run as a distinct identity — the Actions GITHUB_TOKEN is
+    # forbidden from approving PRs. None when no approver App is wired (approve
+    # then uses the default token and fails soft, as before). Enabling auto-merge
+    # below stays on the default token — only the approve needs the App.
+    approve_env = _approver_env()
+    if approve_env is None and prs:
+        print("  NOTE: no approver App token (APPROVE_TOKEN unset) — approvals "
+              "will fail soft; wire approve_app_id/approve_app_private_key to "
+              "auto-merge minor/patch Dependabot PRs.")
+
     for pr in prs:
         number = pr["number"]
         title  = pr["title"]
@@ -597,6 +627,7 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
                 "--body",
                 f"Auto-approved by the daily health-check — "
                 f"minor/patch or SHA-pin update. Run: {health_run_url}",
+                env=approve_env,
             )
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr.strip()
