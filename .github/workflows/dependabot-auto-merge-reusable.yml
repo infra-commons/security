@@ -1,0 +1,95 @@
+name: Dependabot auto-merge (reusable)
+
+# Canonical Dependabot auto-merge for repos WITHOUT required-review branch
+# protection (Kevin's side-project orgs — cashbucket-com, klsjapan-com, ...).
+# The logic lives here ONCE; each repo ships a ~10-line caller pinned to the
+# `dependabot-auto-merge/v1` moving tag, so a fix ships by moving that tag and
+# every consumer picks it up — there is no per-repo/per-org logic to drift.
+#
+# Why this is separate from the daily health-check's Dependabot lane:
+#   • The rolliq platform (rolliq-com / infra-commons) has reviews:1 protection,
+#     so its Dependabot lane must APPROVE — and GitHub forbids the Actions
+#     GITHUB_TOKEN from approving, so that lane needs an approver App.
+#   • These side-project repos have NO branch protection, so there is nothing to
+#     approve: enabling native auto-merge is sufficient and it merges when the
+#     repo's checks pass. No App, no secret, no org "Actions can approve" toggle.
+#
+# Majors are NEVER auto-merged (they stay manual), matching the health-check lane.
+#
+# Caller pattern (per repo — this is the whole file):
+#   name: Dependabot auto-merge
+#   on:
+#     pull_request_target:            # NOT pull_request — needs the base-repo
+#                                     # write token to enable auto-merge. This
+#                                     # workflow never checks out or runs PR code.
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     auto-merge:
+#       uses: infra-commons/security/.github/workflows/dependabot-auto-merge-reusable.yml@dependabot-auto-merge/v1
+#
+# One-time repo setting: "Allow auto-merge" must be ON, or `gh pr merge --auto`
+# errors (the caller then simply does nothing and the PR waits for a human).
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      merge_method:
+        description: "Merge method for auto-merge: squash | merge | rebase."
+        type: string
+        required: false
+        default: squash
+      include_minor:
+        description: >-
+          Auto-merge minor bumps in addition to patch. Set false for patch-only.
+          Majors are NEVER auto-merged regardless.
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge for minor/patch Dependabot PRs
+    # Cheap pre-filter: only Dependabot-authored PRs are ever eligible.
+    if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The workflow-level `permissions: {}` zeroes every job by default, so grant
+    # the token this job needs HERE (reusable jobs don't inherit past a
+    # workflow-level permissions: declaration). Still capped by the caller's grant.
+    permissions:
+      contents: write        # enable native auto-merge / squash
+      pull-requests: write   # required for gh pr merge --auto
+
+    steps:
+      # Reads Dependabot's structured metadata for this PR (update type, etc.).
+      # More robust than parsing the PR title.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Enable auto-merge for eligible update types
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          (inputs.include_minor && steps.meta.outputs.update-type == 'version-update:semver-minor')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL:   ${{ github.event.pull_request.html_url }}
+          MM:       ${{ inputs.merge_method }}
+          UT:       ${{ steps.meta.outputs.update-type }}
+        run: |
+          echo "Eligible ($UT) — enabling auto-merge on $PR_URL"
+          if ! gh pr merge "$PR_URL" --auto --"$MM"; then
+            echo "::warning::Could not enable auto-merge (is 'Allow auto-merge' ON for this repo?). PR left for a human." >&2
+          fi
+
+      - name: Report skip
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-major' ||
+          (!inputs.include_minor && steps.meta.outputs.update-type == 'version-update:semver-minor')
+        env:
+          UT: ${{ steps.meta.outputs.update-type }}
+        run: echo "Skipping $UT — stays manual."
