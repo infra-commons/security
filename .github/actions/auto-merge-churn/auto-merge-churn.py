@@ -83,6 +83,17 @@ def glob_to_re(pat: str) -> "re.Pattern":
 HARD_RE  = [glob_to_re(p) for p in HARD_EXCLUDE]
 ALLOW_RE = [glob_to_re(p) for p in ALLOW]
 
+# Suppression files carry accepted-risk edits. When one documents an accepted
+# CRITICAL, the legal/adversarial gate stays red BY DESIGN — a suppression
+# cannot green a genuine CRITICAL; that needs a repo-owner bypass merge, and the
+# bypass IS the sign-off. Enabling native auto-merge on such a PR HIDES GitHub's
+# manual "merge without waiting for requirements" button, stranding the PR
+# against a gate that will never go green (this bit us on the consent-removal
+# suppression, rolliq solution-rrc #711). So we still auto-APPROVE suppression
+# PRs (they satisfy reviews:1 and merge in one click when green), but never
+# auto-ENABLE auto-merge on them — the human keeps the bypass button.
+SUPPRESSION_RE = glob_to_re(".github/*-suppressions.yml")
+
 
 def gh_json(*args):
     r = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
@@ -137,6 +148,15 @@ def main() -> None:
             print("  already approved")
         else:
             print(f"  WARNING: approval failed: {exc.stderr.strip()[:120]}", file=sys.stderr)
+
+    # Suppression PRs: approve (done above) but never enable auto-merge, so the
+    # manual bypass button stays available for an accepted-CRITICAL merge whose
+    # legal/adversarial gate is red by design. See SUPPRESSION_RE.
+    supp = [f for f in files if SUPPRESSION_RE.match(f)]
+    if supp:
+        print(f"  suppression file(s) touched ({supp}); leaving auto-merge OFF so the "
+              "manual bypass button stays available. Approved only.")
+        return
 
     # Enable native auto-merge — merges only once required checks pass.
     try:
