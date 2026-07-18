@@ -753,10 +753,20 @@ def delete_previous_comments(token: str, repo: str, pr_number: int, marker: str)
         resp.raise_for_status()
         for comment in resp.json():
             if marker in comment.get("body", ""):
-                client.delete(
-                    f"{GITHUB_API}/repos/{repo}/issues/comments/{comment['id']}",
-                    headers=_gh_headers(token),
-                ).raise_for_status()
+                # Best-effort: removing a stale prior comment is cosmetic cleanup,
+                # not part of the gate. A transient API error, or a comment already
+                # gone (404), must not fail the review job — the finding POST in
+                # post_comment() still raises.
+                try:
+                    client.delete(
+                        f"{GITHUB_API}/repos/{repo}/issues/comments/{comment['id']}",
+                        headers=_gh_headers(token),
+                    ).raise_for_status()
+                except Exception as exc:
+                    print(
+                        f"Warning: could not delete previous comment {comment['id']}: {exc}",
+                        file=sys.stderr,
+                    )
 
 
 def post_comment(token: str, repo: str, pr_number: int, body: str) -> None:
