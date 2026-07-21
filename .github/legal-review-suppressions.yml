@@ -203,3 +203,15 @@ suppressions:
     reason: "Segregation of duties between operator and approver is not currently possible in a single-operator company. Compensating controls are documented (recorded pre-session authorization, before/after checklist, least-privilege time-boxed elevation removed at session end), and the structural fix is the tracked foundry-deployment Terraform module that removes manual tenant access."
     added: "2026-07-11"
     added_by: "kev@rolliq.com"
+
+  # ── Class N: the Dependabot auto-merge workflow is intentional first-party design ─
+  - id: dependabot-auto-merge-workflow-reviewed-gate-by-design
+    file_pattern: "\\.github/workflows/dependabot-auto-merge\\.ya?ml(:\\d+(-\\d+)?)?$"
+    finding_pattern: "auto.?merge.{0,120}(bypass|without|skip|no ).{0,60}(human review|review gate|mandatory review|CODEOWNERS|approval|oversight)|auto.?merge.{0,120}(mandatory|human).{0,40}review"
+    reason: >
+      The Dependabot auto-merge workflow is the canonical, intentional cross-org design. It
+      auto-merges ONLY Dependabot-authored dependency-update PRs that have passed the required CI
+      checks (build, tests, security/legal review jobs) — passing those required checks IS the
+      reviewed gate for first-party dependency bumps. It does not merge human-authored changes and
+      does not bypass CODEOWNERS for product code. Removing manual toil on routine dependency
+      upgrades is the whole point; accepted platform-wide by design. Permanent.
