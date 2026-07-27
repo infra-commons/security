@@ -1,2 +1,9 @@
 __pycache__/
 *.pyc
+
+# Hypothesis writes its example database here. It self-ignores (it drops a
+# `.gitignore` containing `*` inside the directory on first run), so this line
+# is belt-and-braces: hypothesis only creates that file when it creates the
+# directory, so a pre-existing `.hypothesis/` or a deleted self-ignore would
+# otherwise leave the tree dirty.
+.hypothesis/
