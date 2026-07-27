@@ -1,0 +1,37 @@
+name: Tests
+
+# Runs the unit tests for the composite actions in this repo.
+#
+# This matters more here than in an ordinary repo: the actions are consumed
+# fleet-wide through *moving* version tags (e.g. `adversarial-review/v1`), so a
+# regression reaches every caller as soon as the tag advances, with no per-caller
+# pin bump to review it first. These tests are the only automated check between
+# an edit here and 13+ repos' merge gates.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  adversarial-review:
+    name: adversarial-review unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Mirrors the versions the composite action itself installs, so the
+        # tests exercise the same SDK surface that runs in production.
+        run: pip install pytest==8.3.4 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2
+
+      - name: Run tests
+        run: python -m pytest .github/actions/adversarial-review -q
