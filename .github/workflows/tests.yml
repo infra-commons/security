@@ -31,7 +31,13 @@ jobs:
       - name: Install dependencies
         # Mirrors the versions the composite action itself installs, so the
         # tests exercise the same SDK surface that runs in production.
-        run: pip install pytest==8.3.4 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2
+        # `hypothesis` is test-only — the action itself does not import it.
+        run: pip install pytest==8.3.4 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2 hypothesis==6.161.8
 
       - name: Run tests
+        # The `ci` hypothesis profile is derandomised (see conftest.py): a
+        # property test must never fail a PR that an identical rerun would pass.
+        # Broader randomised exploration happens locally under the `dev` profile.
+        env:
+          HYPOTHESIS_PROFILE: ci
         run: python -m pytest .github/actions/adversarial-review -q
