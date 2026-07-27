@@ -40,11 +40,21 @@ PROVIDERS = {
         "model": "claude-sonnet-4-6",
         "label": "Claude",
         "marker": "<!-- adversarial-review-bot -->",
+        # The primary reviewer blocks on a CRITICAL finding anywhere in the diff.
+        "blocking_scope": "always",
     },
     "openai": {
-        "model": "gpt-4o",
+        # Pinned to the dated snapshot, not the floating `gpt-5.5` alias: an
+        # alias silently re-points the security reviewer's model underneath us,
+        # which is the same class of drift the SHA pins elsewhere exist to stop.
+        # Verified present on the org key's /v1/models listing (2026-07-27).
+        "model": "gpt-5.5-2026-04-23",
         "label": "OpenAI",
         "marker": "<!-- adversarial-review-openai-bot -->",
+        # The cross-family second opinion blocks only where the blast radius
+        # justifies a false positive stopping the line; elsewhere it still runs
+        # and still comments, but cannot fail the gate. See HIGH_RISK_PATH_RE.
+        "blocking_scope": "high_risk_paths",
     },
 }
 
@@ -70,6 +80,27 @@ _SUPPRESSIONS_PATH_RE = re.compile(r'^\.github/[A-Za-z0-9_./-]+\.ya?ml$')
 _SECURITY_FILE_RE = re.compile(
     r'(secret|credential|auth|password|token|signing|'
     r'\.github[\\/]|\.tf$|\.tfvars|config|settings|\.env)',
+    re.IGNORECASE,
+)
+
+# Paths where a CRITICAL finding from a `high_risk_paths`-scoped reviewer is
+# allowed to block merge: authentication, authorisation, data handling, schema
+# changes, public API surfaces, IaC and CI/CD. Everywhere else that reviewer is
+# advisory — it still runs and still comments, it just cannot fail the gate.
+#
+# Deliberately broader than a minimal list: a false negative here silently
+# downgrades a real blocking finding to advisory, which is the expensive
+# direction. A false positive only means a PR gets the stricter treatment.
+HIGH_RISK_PATH_RE = re.compile(
+    r'('
+    r'auth|login|logout|session|password|credential|secret|token|signing|crypto|'
+    r'permission|role|rbac|acl|policy|tenant|'
+    r'migration|schema|\.sql$|models?[\\/]|'
+    r'api[\\/]|routes?[\\/]|endpoints?[\\/]|controllers?[\\/]|webhook|'
+    r'\.tf$|\.tfvars|\.bicep$|infra[\\/]|terraform[\\/]|'
+    r'\.github[\\/]workflows[\\/]|\.github[\\/]actions[\\/]|'
+    r'dockerfile|docker-compose|\.env'
+    r')',
     re.IGNORECASE,
 )
 
@@ -261,6 +292,44 @@ def get_diff(base_sha: str, head_sha: str) -> str:
     return diff
 
 
+# ── Blocking scope ─────────────────────────────────────────────────────────────
+
+def get_changed_files(base_sha: str, head_sha: str) -> list[str]:
+    """Full list of paths changed by the PR.
+
+    Deliberately a separate `--name-only` call rather than parsing get_diff()'s
+    output: that output is truncated at MAX_DIFF_CHARS, so on a large PR the
+    file that makes the change high-risk could be cut and silently downgrade
+    the gate to advisory.
+    """
+    if not _SHA_RE.fullmatch(base_sha) or not _SHA_RE.fullmatch(head_sha):
+        raise ValueError(f"Invalid SHA format: base={base_sha!r} head={head_sha!r}")
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_sha}...{head_sha}"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def touches_high_risk_path(paths: list[str]) -> bool:
+    return any(HIGH_RISK_PATH_RE.search(p) for p in paths)
+
+
+def is_blocking(provider_cfg: dict, paths: list[str]) -> bool:
+    """Whether a CRITICAL finding from this reviewer may fail the gate.
+
+    Fails closed: only the one recognised narrowing scope can downgrade a
+    finding to advisory. Anything else — including an unset or misspelt
+    blocking_scope — blocks.
+    """
+    if provider_cfg.get("blocking_scope") == "high_risk_paths":
+        return touches_high_risk_path(paths)
+    return True
+
+
 # ── Repo context ───────────────────────────────────────────────────────────────
 
 def get_repo_context() -> str:
@@ -310,13 +379,33 @@ def call_openai(api_key: str, model: str, diff: str, context: str, system_prompt
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
-        max_tokens=4096,
+        # Reasoning models reject `max_tokens` outright (400), and count their
+        # internal reasoning tokens against this budget — so it must be far
+        # larger than the ~4k of visible review text we actually want back, or
+        # reasoning consumes the whole allowance and the content comes back empty.
+        max_completion_tokens=16384,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": _build_user_content(diff, context)},
         ],
     )
-    return response.choices[0].message.content
+    choice = response.choices[0]
+    content = choice.message.content
+
+    # An empty or truncated completion must NOT read as "no findings": that is a
+    # silent fail-open, indistinguishable from a clean review. Raise instead —
+    # a non-infra exception fails the job, and the gate blocks on a failed job.
+    if not content or not content.strip():
+        raise RuntimeError(
+            f"{model} returned an empty completion (finish_reason="
+            f"{choice.finish_reason!r}) — review did not run; not treating as clean."
+        )
+    if choice.finish_reason == "length":
+        raise RuntimeError(
+            f"{model} hit the token budget before finishing the review "
+            "(finish_reason='length') — findings may be truncated; not treating as clean."
+        )
+    return content
 
 
 def run_review(provider: str, api_key: str, model: str, diff: str, context: str, system_prompt: str) -> str:
@@ -861,6 +950,14 @@ def main() -> None:
     if suppressions:
         print(f"Injecting {len(suppressions)} suppression hints into system prompt.")
 
+    changed_files = get_changed_files(base_sha, head_sha)
+    blocking = is_blocking(cfg, changed_files)
+    if not blocking:
+        print(
+            f"{label} is advisory on this PR — none of its {len(changed_files)} changed "
+            "file(s) touch a high-risk path. Findings will be posted but cannot fail the gate."
+        )
+
     context = get_repo_context()
     print(f"Running adversarial review (provider={provider}, model={model}, diff={len(diff)} chars) …")
     try:
@@ -878,7 +975,19 @@ def main() -> None:
         print(f"Suppressed {len(suppressed)} finding(s) via suppressions file.")
 
     critical = has_critical_findings(filtered_review)
-    set_github_output("has_critical", "true" if critical else "false")
+    # An advisory reviewer still reports everything it found; it just does not
+    # get to fail the gate. Only the gate signal is downgraded, never the comment.
+    blocks_merge = critical and blocking
+    set_github_output("has_critical", "true" if blocks_merge else "false")
+
+    advisory_note = ""
+    if critical and not blocking:
+        advisory_note = (
+            "> ⚠️ **Advisory only — this review is not blocking merge.** No changed file "
+            "touches a high-risk path (auth, authz, data handling, schema, public API, IaC, "
+            "CI/CD), so this reviewer runs as a second opinion here. **Read the CRITICAL "
+            "findings below and judge them on their merits before merging.**\n"
+        )
 
     suppressed_section = ""
     if suppressed:
@@ -896,7 +1005,8 @@ def main() -> None:
         f"## Adversarial AI Security Review ({label} {model})\n\n"
         f"> **AI-generated by {label} {model}** — treat findings as a starting point, not a final verdict.\n"
         f"> Dismiss only after confirming a finding is mitigated or a false positive.\n"
-        f"> Commit: `{head_sha[:8]}`\n\n"
+        f"> Commit: `{head_sha[:8]}`\n"
+        f"{advisory_note}\n"
         f"{filtered_review}{suppressed_section}\n\n"
         f"---\n"
         f"*Posted by the adversarial-review reusable workflow*"
