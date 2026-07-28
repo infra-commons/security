@@ -17,8 +17,11 @@ Covers the three defects in rolliq-com/solution-recruitment-reference-check#888:
      a failure rather than the presence of a pass
   3. the workflow-file lookup was fed the RUN name, so it never matched any
      workflow that sets `run-name:`
+  4. every consumer head-sliced the job log, so the diagnosis model was shown
+     runner provisioning rather than the failure
 """
 import importlib.util
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -353,3 +356,181 @@ def test_dry_run_neither_files_nor_closes(triage_harness):
 
     assert triage_harness["filed"] == []
     assert triage_harness["closed"] == []
+
+
+# ── Defect 4: the diagnosis never saw the failure ─────────────────────────────
+#
+# Measured on the real job log behind
+# rolliq-com/solution-recruitment-reference-check#885 (job 89864053280,
+# 179 511 chars): the endpoint returns PLAIN TEXT, so the ZIP branch never ran
+# and the `BadZipFile` fallback head-sliced to 30 000 chars; the diagnosis then
+# sliced that to 12 000. The first `##[error]` sits at char 135 168 (75% in),
+# so the model saw 6.7% of the log, all of it runner provisioning, and
+# truthfully reported "the log is truncated, the failure is not visible".
+
+BOILERPLATE = "".join(
+    f"2026-07-27T01:04:{i % 60:02d}.0000000Z Runner provisioning line {i}\n"
+    for i in range(3_000)
+)
+TERRAFORM_ERROR = (
+    "2026-07-27T01:09:12.0000000Z Error: a resource with the ID "
+    '".../deployments/gpt-5.5" already exists - to be managed via Terraform '
+    "this resource needs to be imported into the State\n"
+    "2026-07-27T01:09:12.0000000Z ##[error]Terraform exited with code 1\n"
+)
+TRAILER = "".join(
+    f"2026-07-27T01:09:{i % 60:02d}.0000000Z Post job cleanup {i}\n"
+    for i in range(500)
+)
+DEPLOY_LOG = BOILERPLATE + TERRAFORM_ERROR + TRAILER
+
+
+def test_excerpt_of_a_short_log_is_the_whole_log():
+    assert hc.select_log_excerpt("short log", 12_000) == "short log"
+
+
+def test_excerpt_contains_the_failure_not_the_runner_boilerplate():
+    # The whole point: a head slice of this log is `Runner provisioning line …`.
+    excerpt = hc.select_log_excerpt(DEPLOY_LOG, 12_000)
+
+    assert "already exists" in excerpt
+    assert "needs to be imported into the State" in excerpt
+    assert "##[error]" in excerpt
+    assert "Runner provisioning line 0\n" not in excerpt
+
+
+def test_excerpt_never_exceeds_the_caller_s_budget():
+    # Callers size these against a prompt budget, and the truncation markers
+    # are part of what gets sent.
+    for limit in (500, 8_000, 12_000, 30_000):
+        assert len(hc.select_log_excerpt(DEPLOY_LOG, limit)) <= limit
+
+
+def test_excerpt_keeps_context_BEFORE_the_error_because_the_cause_precedes_it():
+    excerpt = hc.select_log_excerpt(DEPLOY_LOG, 12_000)
+    before = excerpt.index("##[error]")
+    # Terraform prints the offending resource, then announces the failure.
+    assert before > len(excerpt) * 0.4
+
+
+def test_excerpt_falls_back_to_the_TAIL_when_nothing_annotated_the_failure():
+    # A tool that died without an `Error:` line or a runner annotation still
+    # leaves its last words at the end, never at the beginning.
+    unannotated = BOILERPLATE + "2026-07-27T01:09:12.0000000Z the last words\n"
+    excerpt = hc.select_log_excerpt(unannotated, 2_000)
+
+    assert "the last words" in excerpt
+    assert "Runner provisioning line 0\n" not in excerpt
+
+
+def test_the_runner_annotation_outranks_an_earlier_bare_error_line():
+    # `##[error]` is GitHub's own annotation and effectively never a false
+    # positive; a bare `Error:` printed by a tool that then RECOVERED is.
+    log = (
+        "Error: retrying, this one recovered\n"
+        + "x" * 40_000
+        + "\n##[error]this is the one that killed the job\n"
+        + "y" * 5_000
+    )
+    excerpt = hc.select_log_excerpt(log, 6_000)
+
+    assert "this is the one that killed the job" in excerpt
+    assert "this one recovered" not in excerpt
+
+
+def test_an_anchor_at_the_very_end_still_spends_the_whole_budget():
+    log = "z" * 40_000 + "\n##[error]died at the last line\n"
+    excerpt = hc.select_log_excerpt(log, 4_000)
+
+    assert "died at the last line" in excerpt
+    # Without reclaiming the unused forward half, this would be ~2 400 chars.
+    assert len(excerpt) > 3_500
+
+
+def test_get_job_logs_returns_the_log_WHOLE(monkeypatch):
+    # The structural guard. Truncating here puts a head slice upstream of every
+    # consumer and silently re-introduces this defect no matter what
+    # `select_log_excerpt` does.
+    class _Result:
+        returncode = 0
+        stdout = DEPLOY_LOG.encode("utf-8")
+
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **k: _Result())
+
+    assert hc.get_job_logs(1, "o/r") == DEPLOY_LOG
+
+
+def test_zip_entries_are_ordered_naturally_so_step_10_follows_step_2():
+    names = ["10_Deploy.txt", "2_Checkout.txt", "1_Set up job.txt"]
+    assert sorted(names, key=hc._natural_key) == [
+        "1_Set up job.txt", "2_Checkout.txt", "10_Deploy.txt"]
+
+
+# ── Defect 4, at the CALL SITES ───────────────────────────────────────────────
+#
+# Asserting `select_log_excerpt` in isolation cannot detect a caller that still
+# head-slices, which is exactly how the defect-3 test passed its own negative
+# control. These assert what the callers actually put in front of the model.
+
+@pytest.fixture
+def prompt_recorder(monkeypatch):
+    prompts: list[str] = []
+
+    _REPLY = ('{"is_transient": false, "root_cause": "r", "fix": "f", '
+              '"severity": "high", "mechanical": false}')
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            prompts.append(kwargs["messages"][0]["content"])
+            block = type("Block", (), {"text": _REPLY})()
+            return type("Msg", (), {"content": [block]})()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(hc, "anthropic_sdk",
+                        type("SDK", (), {"Anthropic": _FakeClient}))
+    return prompts
+
+
+def test_the_diagnosis_prompt_carries_the_failure_region(prompt_recorder):
+    hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")
+
+    assert len(prompt_recorder) == 1
+    prompt = prompt_recorder[0]
+    assert "needs to be imported into the State" in prompt
+    assert "Runner provisioning line 0\n" not in prompt
+
+
+def test_the_autofix_prompt_carries_the_failure_region(prompt_recorder, tmp_path,
+                                                      monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "deploy.yml").write_text("name: deploy\n")
+
+    hc.try_autofix(
+        repo="o/r",
+        workflow_name="wf",
+        workflow_file_path=".github/workflows/deploy.yml",
+        log_excerpt=DEPLOY_LOG,
+        diagnosis={"root_cause": "r", "fix": "f"},
+        health_run_url="u",
+        dry_run=True,
+    )
+
+    assert len(prompt_recorder) == 1
+    assert "needs to be imported into the State" in prompt_recorder[0]
+
+
+def test_the_transient_scan_looks_at_the_failure_region_not_the_head(monkeypatch):
+    # A rate-limit that appears at the failure is the one worth re-running on.
+    # Scanning `logs[:5_000]` meant this override could effectively never fire.
+    log = BOILERPLATE + "2026-07-27T01:09:12.0000000Z ##[error]API rate limit exceeded\n"
+    window = hc.select_log_excerpt(log, 30_000)
+
+    assert any(re.search(p, window, re.IGNORECASE) for p in hc._TRANSIENT_PATTERNS)
+    assert not any(re.search(p, log[:5_000], re.IGNORECASE)
+                   for p in hc._TRANSIENT_PATTERNS)
