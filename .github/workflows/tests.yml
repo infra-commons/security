@@ -41,3 +41,24 @@ jobs:
         env:
           HYPOTHESIS_PROFILE: ci
         run: python -m pytest .github/actions/adversarial-review -q
+
+  daily-health-check:
+    name: daily-health-check unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Mirrors the version the composite action installs. The action's
+        # `anthropic` import is already guarded (falls back to pattern-only
+        # diagnosis), so the tests would import without it; pin it anyway so
+        # they exercise the same SDK surface that runs in production.
+        run: pip install pytest==8.3.4 'anthropic==0.49.0'
+
+      - name: Run tests
+        run: python -m pytest .github/actions/daily-health-check -q

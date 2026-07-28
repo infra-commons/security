@@ -549,25 +549,46 @@ def file_or_update_issue(
 def auto_close_resolved_issues(
     repo: str,
     open_issues: dict[str, int],
-    currently_failing: set[str],
+    still_failing: set[str],
+    latest_success: dict[str, datetime],
     health_run_url: str,
 ) -> int:
+    """Close health-check issues whose workflow has since PASSED.
+
+    Two conditions, and both matter:
+
+    - not in `still_failing`: an unsuperseded failure in the window keeps it open.
+    - present in `latest_success`: there is a real passing run to point at.
+
+    The second is what stops a false clear. Closing on the mere absence of a
+    failure means a workflow that has not run at all in the lookback window gets
+    its issue closed with nothing fixed, which is the wrong direction for a check
+    that exists to keep failures visible. It also makes the behaviour match what
+    the issue body promises ("auto-closes when the workflow passes again").
+    """
     closed = 0
     for workflow_name, number in open_issues.items():
-        if workflow_name not in currently_failing:
-            try:
-                _gh(
-                    "issue", "close", str(number),
-                    "--repo", repo,
-                    "--comment",
-                    f"`{workflow_name}` is no longer failing — auto-closing.\n"
-                    f"_Health check: {health_run_url}_",
-                )
-                print(f"  AUTO-CLOSED #{number}: {workflow_name}")
-                closed += 1
-            except subprocess.CalledProcessError as exc:
-                print(f"  Warning: could not close #{number} — {exc.stderr.strip()[:60]}",
-                      file=sys.stderr)
+        if workflow_name in still_failing:
+            continue
+        success_ts = latest_success.get(workflow_name)
+        if success_ts is None:
+            print(f"  Leaving #{number} open: {workflow_name} has not passed in the "
+                  f"lookback window (no successful run to close against)")
+            continue
+        try:
+            _gh(
+                "issue", "close", str(number),
+                "--repo", repo,
+                "--comment",
+                f"`{workflow_name}` passed again at {success_ts:%Y-%m-%d %H:%M}Z "
+                f"— auto-closing.\n"
+                f"_Health check: {health_run_url}_",
+            )
+            print(f"  AUTO-CLOSED #{number}: {workflow_name}")
+            closed += 1
+        except subprocess.CalledProcessError as exc:
+            print(f"  Warning: could not close #{number} — {exc.stderr.strip()[:60]}",
+                  file=sys.stderr)
     return closed
 
 
@@ -726,10 +747,19 @@ def find_auto_merged_last_24h(repo: str, lookback_hours: int) -> dict:
 # ── Workflow failure triage ────────────────────────────────────────────────────
 
 def _find_workflow_file(workflow_name: str) -> str | None:
-    """Map a workflow display name to its file path in the checked-out workspace.
+    """Map a workflow's `name:` to its file path in the checked-out workspace.
 
-    GitHub run names come from the workflow's `name:` field; we need to find
-    the actual .github/workflows/*.yml file that has that name.
+    Pass the WORKFLOW name here, not the run name. They are different whenever a
+    workflow sets `run-name:`, which every deploy workflow does in order to put
+    the client slug in the title:
+
+        name:     Release — STAGING (build once + test)
+        run-name: 🧪 STAGING release → ${{ inputs.client_slug }}
+
+    `gh run list --json name` returns the RUN name, so matching that against the
+    file's `name:` field never hits and the mechanical auto-fix tier silently
+    falls through to filing an issue. Use `workflowName` for this lookup and keep
+    the run name for issue identity, where the client slug is what we want.
     """
     workflows_dir = Path(".github/workflows")
     if not workflows_dir.is_dir():
@@ -745,27 +775,34 @@ def _find_workflow_file(workflow_name: str) -> str | None:
     return None
 
 
-def triage_failed_runs(
-    repo: str,
-    lookback_hours: int,
-    health_run_url: str,
-    dry_run: bool,
-) -> dict:
-    """Detect, diagnose, and heal failed workflow runs."""
+def _collect_runs(repo: str, status: str, cutoff: datetime) -> list[dict]:
+    """Runs with the given status, newer than `cutoff`, de-duplicated by id.
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    Each returned run carries a parsed `_ts`. Runs whose timestamp cannot be
+    parsed are dropped rather than guessed at: treating one as "now" would let a
+    bad timestamp supersede a real failure.
 
-    all_runs: list[dict] = []
+    The `--limit 30` per event can truncate on a very busy repo. Note which way
+    that fails: truncated SUCCESSES mean a supersession is missed and the failure
+    gets reported anyway (noisy, safe), while truncated FAILURES mean one is
+    missed entirely (silent); the latter is pre-existing behaviour and the
+    reason to keep the limit generous relative to `lookback_hours`.
+    """
+    collected: list[dict] = []
     seen_ids: set[int] = set()
     for event in ("schedule", "workflow_dispatch", "push"):
         runs = _gh_json(
             "run", "list",
             "--repo", repo,
-            "--status", "failure",
+            "--status", status,
             "--event", event,
-            "--json", "databaseId,name,event,createdAt,url",
+            # `name` is the RUN name (carries the client slug via `run-name:`);
+            # `workflowName` is the workflow's own `name:`, needed to find its file.
+            "--json", "databaseId,name,workflowName,event,createdAt,url",
             "--limit", "30",
         )
+        if not isinstance(runs, list):
+            continue
         for run in runs:
             rid = run.get("databaseId", 0)
             if rid in seen_ids:
@@ -778,28 +815,90 @@ def triage_failed_runs(
             except ValueError:
                 continue
             if ts >= cutoff:
-                all_runs.append(run)
+                run["_ts"] = ts
+                collected.append(run)
+    return collected
 
-    if not all_runs:
-        print(f"  No failed runs in last {lookback_hours}h.")
-        return {"failures": 0, "rerun": 0, "autofix_pr": 0, "filed": 0, "updated": 0, "closed": 0}
 
-    print(f"  Found {len(all_runs)} failed run(s) in last {lookback_hours}h.")
+def _latest_success_by_run_name(runs: list[dict]) -> dict[str, datetime]:
+    """Most recent successful run time per run name."""
+    latest: dict[str, datetime] = {}
+    for run in runs:
+        name = run.get("name", "")
+        ts = run.get("_ts")
+        if not name or ts is None:
+            continue
+        if name not in latest or ts > latest[name]:
+            latest[name] = ts
+    return latest
+
+
+def triage_failed_runs(
+    repo: str,
+    lookback_hours: int,
+    health_run_url: str,
+    dry_run: bool,
+) -> dict:
+    """Detect, diagnose, and heal failed workflow runs."""
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+    failed_runs = _collect_runs(repo, "failure", cutoff)
+    # Successes are collected across the same events so a scheduled failure can be
+    # superseded by a later manual re-run, which is the common healing path.
+    latest_success = _latest_success_by_run_name(_collect_runs(repo, "success", cutoff))
+
+    # Drop failures a later run of the SAME run name has already put right. The
+    # run name carries the client slug for any workflow with a `run-name:`, so
+    # this is already per-client: a `kin` success cannot supersede a
+    # `rolliq-test` failure of the same shared workflow.
+    all_runs: list[dict] = []
+    for run in failed_runs:
+        name = run["name"]
+        success_ts = latest_success.get(name)
+        if success_ts and success_ts > run["_ts"]:
+            print(
+                f"  Superseded, not reporting: {name} (run #{run['databaseId']} failed "
+                f"{run['_ts']:%Y-%m-%d %H:%M}Z, passed again {success_ts:%Y-%m-%d %H:%M}Z)"
+            )
+            continue
+        all_runs.append(run)
 
     if not dry_run:
         ensure_labels(repo)
     open_issues = get_open_health_issues(repo)
 
+    # Auto-close BEFORE the early return. Previously this lived after it, so on a
+    # fully green day the function returned early and nothing was ever closed --
+    # an issue could only be closed on a day some other workflow happened to
+    # fail. Closing is keyed on a later SUCCESS, not on the mere absence of a
+    # failure, so a workflow that simply has not run in the window keeps its
+    # issue open instead of being falsely cleared.
+    still_failing = {run["name"] for run in all_runs}
+    closed = 0
+    if not dry_run:
+        closed = auto_close_resolved_issues(
+            repo, open_issues, still_failing, latest_success, health_run_url
+        )
+
+    if not all_runs:
+        print(f"  No unsuperseded failed runs in last {lookback_hours}h.")
+        return {"failures": 0, "rerun": 0, "autofix_pr": 0, "filed": 0,
+                "updated": 0, "closed": closed}
+
+    print(f"  Found {len(all_runs)} failed run(s) in last {lookback_hours}h.")
+
     filed = updated = rerun = autofix_pr = 0
-    currently_failing: set[str] = set()
 
     for run in all_runs:
         run_id        = run["databaseId"]
+        # Run name: identifies the issue, and carries the client slug.
         workflow_name = run["name"]
+        # Workflow `name:`: what actually matches a file on disk.
+        wf_display    = run.get("workflowName") or workflow_name
         run_link      = run["url"]
 
         print(f"\n  Triaging: {workflow_name} (run #{run_id})")
-        currently_failing.add(workflow_name)
 
         jobs_data = _gh_api(f"/repos/{repo}/actions/runs/{run_id}/jobs") or {}
         jobs = jobs_data.get("jobs", [])
@@ -854,7 +953,7 @@ def triage_failed_runs(
 
         # ── Tier 2: Mechanical — attempt auto-fix PR ───────────────────────
         elif is_mechanical:
-            wf_file = _find_workflow_file(workflow_name)
+            wf_file = _find_workflow_file(wf_display)
             if wf_file:
                 print(f"    Attempting auto-fix of {wf_file}…")
                 fix_pr_url = try_autofix(
@@ -869,7 +968,7 @@ def triage_failed_runs(
                 if fix_pr_url and fix_pr_url != "[dry-run]":
                     autofix_pr += 1
             else:
-                print(f"    Auto-fix: workflow file for '{workflow_name}' not found — "
+                print(f"    Auto-fix: workflow file for '{wf_display}' not found — "
                       f"falling through to issue.")
 
         # ── Tier 3: Complex or mechanical-but-unfixable — file issue ──────
@@ -900,12 +999,7 @@ def triage_failed_runs(
                 f"for {workflow_name}"
             )
 
-    closed = 0
-    if not dry_run:
-        closed = auto_close_resolved_issues(
-            repo, open_issues, currently_failing, health_run_url
-        )
-
+    # Auto-close already ran above, before the zero-failure early return.
     return {
         "failures":   len(all_runs),
         "rerun":      rerun,
