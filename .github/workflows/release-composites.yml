@@ -1,0 +1,111 @@
+name: Release composites
+
+# Moves each composite action's `<family>/vN` tag to `main` once its tests pass,
+# and then asserts the tags actually landed.
+#
+# Why this is automated rather than documented: the README's manual release step
+# ("cut a new immutable release tag, then move `<family>/v1`") was forgotten for
+# six of the seven families as of 2026-07-31, one of them for two weeks. An
+# unreleased fix is indistinguishable from a released one from inside this repo
+# (`main` is green, the tests pass, the PR reads as shipped) while every
+# consumer keeps running the old code. Automating the step removes the thing
+# that was being forgotten; the verify job is what proves it happened.
+#
+# The tests gate is not a formality. These tags reach 13+ repos' merge gates
+# with no per-caller pin bump to review them first, so the test jobs are the
+# only automated check between an edit here and the fleet.
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # A heartbeat, because the release path above is a chain: Tests must run,
+    # succeed, and fire `workflow_run`. If any link breaks (the Tests workflow
+    # is renamed, disabled, or stops running on main) the release silently
+    # stops happening and every symptom is the same silence this whole workflow
+    # exists to end. This job notices within a day without depending on it.
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Tag moves are last-write-wins. Serialise them so two pushes cannot race and
+  # leave a tag pointing at the older of the two.
+  group: release-composites
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Move moving tags to main
+    # `workflow_run` fires on failure too; releasing off a red test run is the
+    # one thing this job must never do.
+    if: >-
+      ${{ github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The moving tags are protected by the `protect-moving-tags` ruleset, whose
+      # only bypass actor is the `infra-commons-bot` App. GITHUB_TOKEN cannot move
+      # them however much `contents: write` it is granted, and neither can a human
+      # on the command line: the README's documented
+      # `git push -f origin <family>/v1` has been rejected for everyone since the
+      # ruleset was created on 2026-07-29. Minting the App token is not a
+      # convenience here, it is the only identity permitted to release.
+      - name: Mint releaser App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SHARED_INFRA_APP_ID }}
+          private-key: ${{ secrets.SHARED_INFRA_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app.outputs.token }}
+          # Tags and history are the input: the release compares the action
+          # directory's tree at HEAD against its tree at the moving tag.
+          fetch-depth: 0
+          fetch-tags: true
+          # Pin to the exact commit the tests passed on, not to whatever `main`
+          # points at now. Without this a push landing mid-run would be released
+          # on the strength of the previous commit's tests.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Release any composite whose tag is behind
+        run: python .github/scripts/release_composites.py
+
+      - name: Verify every moving tag now matches the released code
+        # Separate from the step above on purpose. The release step reporting
+        # success is the release mechanism vouching for itself; this re-reads the
+        # tags and compares content. A release that reports green without landing
+        # is the failure shape this workflow exists to close, so it must not be
+        # the same code path that reports it.
+        run: python .github/scripts/check_composite_tags_released.py
+
+  verify:
+    name: Every moving tag matches main
+    if: ${{ github.event_name != 'workflow_run' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: main
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Check every composite is released
+        run: python .github/scripts/check_composite_tags_released.py

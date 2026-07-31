@@ -126,3 +126,26 @@ jobs:
         # asserts this repo's own canonical suppressions are all live, so a PR that adds a
         # dead pattern to that file fails here rather than being found by the weekly audit.
         run: python -m pytest .github/actions/suppression-audit -q
+
+  composite-release:
+    name: composite release tooling unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The version-numbering tests build throwaway git repos, and the
+          # discovery test reads this repo's own `uses:` refs.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Both scripts are stdlib-only: this tooling decides what reaches the
+        # fleet, so it should not be able to break on a dependency resolution.
+        run: pip install pytest==8.3.4
+
+      - name: Run tests
+        run: python -m pytest .github/scripts -q
