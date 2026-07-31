@@ -50,11 +50,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      # Moving a tag is a write. The `protect-moving-tags` ruleset then decides
-      # whether this identity may force-update `refs/tags/*/v1`; `github-actions`
-      # (app id 15368) is on its bypass list for exactly that reason. Creating the
-      # immutable `<family>/vX.Y.Z` tag needs no bypass: `protect-immutable-tags`
-      # restricts update, deletion and non-fast-forward, not creation.
+      # Moving a tag is a write, and this runs as GITHUB_TOKEN rather than as an
+      # App. That is a deliberate choice, not a shortcut: this repo is public, so
+      # it cannot read the org's private-visibility secrets, and putting an App
+      # key in a public repo's secret scope is the larger risk. GitHub Actions
+      # cannot be granted a ruleset bypass either ("Actor GitHub Actions
+      # integration must be part of the ruleset source or owner organization"),
+      # so `protect-moving-tags` instead keeps only its `deletion` rule and
+      # permits the move. `protect-immutable-tags` is untouched and has no bypass
+      # actor at all, so a released `<family>/vX.Y.Z` can never be moved or
+      # deleted by anyone: the integrity guarantee lives in the immutable tags,
+      # which is what the moving pointer is checked against.
       contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
