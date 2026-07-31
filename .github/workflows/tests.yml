@@ -83,3 +83,25 @@ jobs:
 
       - name: Run tests
         run: python -m pytest .github/actions/daily-health-check -q
+
+  suppression-audit:
+    name: suppression-audit unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Mirrors the versions the composite action itself installs.
+        run: pip install pytest==8.3.4 httpx==0.28.1 pyyaml==6.0.2
+
+      - name: Run tests
+        # The match check probes patterns against `git ls-files`, so this needs a real work
+        # tree — checkout's default depth-1 clone provides one; no history is read. One test
+        # asserts this repo's own canonical suppressions are all live, so a PR that adds a
+        # dead pattern to that file fails here rather than being found by the weekly audit.
+        run: python -m pytest .github/actions/suppression-audit -q
