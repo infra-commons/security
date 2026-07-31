@@ -10,9 +10,30 @@ name: Adversarial review (reusable)
 #       with:
 #         run-openai: true        # optional — second reviewer, default false
 #
-# The caller workflow must grant `contents: read` and `pull-requests: write`.
+# The caller workflow must grant `contents: read`, `pull-requests: write` and
+# `issues: write`.
 # Resulting checks: `<caller-job-id> / claude`, `/ openai` (if enabled), `/ gate`.
 # Make `<caller-job-id> / gate` the required status check.
+#
+# ── What enabling the second reviewer does, and does not, buy ────────────────
+# The gate result is three-state, not boolean (see the gate action's script):
+#
+#   blocked    a reviewer found a CRITICAL, a reviewer that was asked to run was
+#              skipped (a configuration fault), or NO reviewer completed
+#   degraded   at least one reviewer answered and at least one did not — the
+#              check PASSES and a tracking issue records the reduced coverage
+#   clear      every reviewer that was asked to run answered
+#
+# So a second provider genuinely is a fallback: one vendor's outage degrades the
+# gate instead of freezing every merge in the repo. Combining the reviewers with
+# a boolean AND would do the opposite — it would double the number of vendors
+# able to freeze the repo, while reading like redundancy.
+#
+# A CRITICAL from *either* reviewer still blocks. That is not loosened here.
+#
+# RELEASE ORDER: the gate job calls `adversarial-review-gate@adversarial-review-gate/v1`.
+# That tag must exist before any caller pins a SHA at or after this commit, or the
+# gate job fails to resolve the action and every PR in the caller blocks.
 
 # Default all permissions to none — each job declares exactly what it needs.
 # This prevents future jobs added without explicit permissions from inheriting
@@ -49,6 +70,7 @@ jobs:
       pull-requests: write
     outputs:
       has_critical: ${{ steps.review.outputs.has_critical }}
+      outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
         uses: infra-commons/security/.github/actions/adversarial-review@adversarial-review/v1
@@ -75,6 +97,7 @@ jobs:
       pull-requests: write
     outputs:
       has_critical: ${{ steps.review.outputs.has_critical }}
+      outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
         uses: infra-commons/security/.github/actions/adversarial-review@adversarial-review/v1
@@ -96,66 +119,53 @@ jobs:
     permissions:
       issues: write
     steps:
+      # The decision is a Python script inside a composite action, not inline
+      # bash, because it is the only thing standing between a review and a
+      # merge and its degraded paths have to be reachable by a unit test. As
+      # inline shell they were reachable only in production, which is where
+      # this gate's worst failure mode kept being discovered.
       - name: Evaluate findings
+        id: evaluate
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@adversarial-review-gate/v1
+        with:
+          claude-result: ${{ needs.claude.result }}
+          claude-has-critical: ${{ needs.claude.outputs.has_critical }}
+          claude-outcome: ${{ needs.claude.outputs.outcome }}
+          openai-result: ${{ needs.openai.result }}
+          openai-has-critical: ${{ needs.openai.outputs.has_critical }}
+          openai-outcome: ${{ needs.openai.outputs.outcome }}
+          run-openai: ${{ inputs.run-openai }}
+          is-fork: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          is-dependabot: ${{ github.actor == 'dependabot[bot]' }}
+
+      # A degraded pass renders in the checks UI exactly like a full pass, so
+      # without a durable record nobody learns that a merge happened on fewer
+      # reviews than the repo is configured for. One issue per PR, deduplicated
+      # by title the same way the critical-findings issue is.
+      - name: Record a degraded pass
+        if: ${{ always() && steps.evaluate.outputs.degraded == 'true' && github.event_name == 'pull_request' }}
         env:
-          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
-          IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          CLAUDE_RESULT: ${{ needs.claude.result }}
-          OPENAI_RESULT: ${{ needs.openai.result }}
-          CLAUDE_HAS_CRITICAL: ${{ needs.claude.outputs.has_critical }}
-          OPENAI_HAS_CRITICAL: ${{ needs.openai.outputs.has_critical }}
-          RUN_OPENAI: ${{ inputs.run-openai }}
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          UNAVAILABLE: ${{ steps.evaluate.outputs.unavailable }}
         run: |
-          # Validate has_critical outputs — must be exactly "true", "false", or empty
-          # (empty when the reviewer job was skipped). Any other value means the review
-          # script wrote unexpected output; fail safe rather than trusting an unknown state.
-          for _var in CLAUDE_HAS_CRITICAL OPENAI_HAS_CRITICAL; do
-            _val="${!_var}"
-            if [ -n "$_val" ] && [ "$_val" != "true" ] && [ "$_val" != "false" ]; then
-              echo "::error::${_var} has unexpected value '${_val}' — must be 'true', 'false', or empty"
-              exit 1
-            fi
-          done
-
-          BLOCK=false
-          SKIP_OK=false
-          if [ "$IS_DEPENDABOT" = "true" ] || [ "$IS_FORK" = "true" ]; then SKIP_OK=true; fi
-
-          CLAUDE="$CLAUDE_RESULT"
-          OPENAI="$OPENAI_RESULT"
-
-          # Claude must run and pass on every normal PR.
-          if [ "$CLAUDE" = "skipped" ] && [ "$SKIP_OK" != "true" ]; then
-            echo "::error::Claude adversarial review was skipped on a normal PR — re-run the workflow."
-            BLOCK=true
+          TITLE="[security] Adversarial review passed degraded on PR #${PR_NUMBER}"
+          EXISTING=$(gh issue list --repo "$REPO" --search "${TITLE}" --state open --json number --jq 'length')
+          if [ "${EXISTING}" -gt "0" ]; then
+            echo "Degraded-pass issue already open for PR #${PR_NUMBER} — skipping."
+            exit 0
           fi
-          if [ "$CLAUDE" = "failure" ] || [ "$CLAUDE" = "cancelled" ]; then
-            echo "::error::Claude adversarial review did not complete ($CLAUDE) — check the job logs."
-            BLOCK=true
-          fi
-          if [ "$CLAUDE_HAS_CRITICAL" = "true" ]; then
-            echo "::error::CRITICAL findings from the Claude review — see the PR comment before merging."
-            BLOCK=true
-          fi
-
-          # OpenAI is only required when the caller opted in.
-          if [ "$RUN_OPENAI" = "true" ]; then
-            if [ "$OPENAI" = "skipped" ] && [ "$SKIP_OK" != "true" ]; then
-              echo "::error::OpenAI adversarial review was skipped on a normal PR — re-run the workflow."
-              BLOCK=true
-            fi
-            if [ "$OPENAI" = "failure" ] || [ "$OPENAI" = "cancelled" ]; then
-              echo "::error::OpenAI adversarial review did not complete ($OPENAI) — check the job logs."
-              BLOCK=true
-            fi
-            if [ "$OPENAI_HAS_CRITICAL" = "true" ]; then
-              echo "::error::CRITICAL findings from the OpenAI review — see the PR comment before merging."
-              BLOCK=true
-            fi
-          fi
-
-          if [ "$BLOCK" = "true" ]; then exit 1; fi
-          echo "No critical findings — adversarial review gate passed."
+          BODY=$(printf '%s\n\n%s\n\n%s\n\n---\n%s' \
+            "## Adversarial review passed with fewer reviewers than configured" \
+            "[PR #${PR_NUMBER}](${PR_URL}) passed the adversarial review gate, but these reviewers produced no verdict: **${UNAVAILABLE}**." \
+            "The gate passes in this state deliberately: a reviewer that did not complete produced no finding to weigh, and blocking every merge on a provider outage costs more than it buys. It is recorded here so the reduced coverage is visible rather than silent. Re-run the workflow once the provider is available if the change warrants a full review." \
+            "_Created automatically by the \`adversarial-review / gate\` workflow._")
+          gh issue create \
+            --repo "$REPO" \
+            --title "${TITLE}" \
+            --body "$BODY"
 
       - name: Create tracking issue for critical findings
         if: >-

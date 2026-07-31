@@ -42,6 +42,27 @@ jobs:
           HYPOTHESIS_PROFILE: ci
         run: python -m pytest .github/actions/adversarial-review -q
 
+  adversarial-review-gate:
+    name: adversarial-review-gate unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # The gate script itself is stdlib-only, deliberately: it is the last
+        # thing between a review and a merge. `pyyaml` is test-only, for the
+        # assertions that bind the reusable workflow's YAML to this action's
+        # input contract.
+        run: pip install pytest==8.3.4 pyyaml==6.0.2
+
+      - name: Run tests
+        run: python -m pytest .github/actions/adversarial-review-gate -q
+
   capture-findings:
     name: capture-findings unit tests
     runs-on: ubuntu-latest

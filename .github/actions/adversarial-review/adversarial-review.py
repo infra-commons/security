@@ -10,9 +10,15 @@ This is the single source of truth for the adversarial review across all
 Rolliq repos. It is shipped inside the `adversarial-review` composite action
 and invoked by the `adversarial-review-reusable` reusable workflow.
 
-Always exits 0 so the review job itself never blocks merge. Writes
-has_critical=true|false to $GITHUB_OUTPUT so the separate gate job can block on
-critical findings.
+Writes two values to $GITHUB_OUTPUT for the separate gate job:
+
+  has_critical  true|false — the verdict, set on every path that completes
+  outcome       reviewed|no-diff|api-error — what actually happened
+
+Both are needed. A transient provider error fails open (has_critical=false) so
+one vendor's outage does not freeze every merge; `outcome` is what stops that
+fail-open from reading as a clean review. A non-transient error propagates and
+fails the job, which the gate sees as a reviewer that did not complete.
 
 Required env vars:
   PROVIDER         anthropic | openai
@@ -943,6 +949,7 @@ def main() -> None:
     if not diff.strip():
         print("Empty diff — nothing to review.")
         set_github_output("has_critical", "false")
+        set_github_output("outcome", "no-diff")
         return
 
     suppressions = load_suppressions()
@@ -967,6 +974,10 @@ def main() -> None:
             print(f"WARNING: API infrastructure error — failing open: {exc}", file=sys.stderr)
             _post_infra_warning(token, repo, pr_number, label, marker, exc)
             set_github_output("has_critical", "false")
+            # `has_critical=false` here means "no verdict", not "no findings".
+            # The gate reads `outcome` to tell the two apart; without it a
+            # fail-open is indistinguishable from a clean review.
+            set_github_output("outcome", "api-error")
             return
         raise
 
@@ -979,6 +990,7 @@ def main() -> None:
     # get to fail the gate. Only the gate signal is downgraded, never the comment.
     blocks_merge = critical and blocking
     set_github_output("has_critical", "true" if blocks_merge else "false")
+    set_github_output("outcome", "reviewed")
 
     advisory_note = ""
     if critical and not blocking:
