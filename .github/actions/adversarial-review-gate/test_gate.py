@@ -86,11 +86,38 @@ def test_a_reviewer_that_failed_open_does_not_count_as_a_review():
 # ── Negative controls: the states a degraded pass must NOT swallow ────────────
 
 def test_no_reviewer_completes_blocks():
-    # The genuine "the gate could not run" state. This must never collapse into
-    # a pass — with no verdict from anyone there is no evidence either way.
+    # The genuine "the gate could not run" state: every job crashed, nothing
+    # was posted on the PR, and nothing anywhere records that the change went
+    # unreviewed. This must never collapse into a silent pass.
     decision = both(reviewer("claude", **ERRORED), reviewer("openai", **ERRORED))
     assert decision.result == gate.BLOCKED
     assert decision.reason == "no-reviewer-completed"
+
+
+def test_every_reviewer_failing_open_passes_degraded_and_is_not_confused_with_a_crash():
+    # Distinct from the case above, and the distinction is load-bearing. The
+    # reviewer action deliberately fails open on transient provider errors and
+    # comments on the PR to say so; that already passes today, and tightening it
+    # here would freeze every consuming repo during a broad outage. What changes
+    # is that the pass is now named `degraded` instead of rendering as clean.
+    decision = both(reviewer("claude", **FAILED_OPEN), reviewer("openai", **FAILED_OPEN))
+    assert decision.result == gate.DEGRADED
+    assert decision.reason == "no-reviewer-produced-a-verdict"
+    assert decision.blocks is False
+
+
+def test_a_crash_alongside_a_fail_open_still_passes_degraded():
+    # No review happened, exactly as in the all-failed-open case, so it resolves
+    # the same way. Today's gate blocks or passes this depending on which error
+    # class the provider returned, which is arbitrary.
+    decision = both(reviewer("claude", **ERRORED), reviewer("openai", **FAILED_OPEN))
+    assert decision.result == gate.DEGRADED
+    assert decision.reason == "no-reviewer-produced-a-verdict"
+
+
+def test_all_failed_open_says_the_pr_was_not_reviewed():
+    decision = both(reviewer("claude", **FAILED_OPEN), reviewer("openai", **FAILED_OPEN))
+    assert any("NOT been reviewed" in m for m in decision.messages)
 
 
 def test_single_provider_repo_still_blocks_when_its_reviewer_errors():
@@ -100,6 +127,13 @@ def test_single_provider_repo_still_blocks_when_its_reviewer_errors():
     decision = both(reviewer("claude", **ERRORED), reviewer("openai", **NOT_ASKED))
     assert decision.result == gate.BLOCKED
     assert decision.reason == "no-reviewer-completed"
+
+
+def test_single_provider_repo_that_fails_open_passes_degraded():
+    # The behaviour every single-provider consumer has today, now named.
+    decision = both(reviewer("claude", **FAILED_OPEN), reviewer("openai", **NOT_ASKED))
+    assert decision.result == gate.DEGRADED
+    assert decision.blocks is False
 
 
 def test_critical_blocks_even_when_the_other_reviewer_is_clear():

@@ -9,9 +9,10 @@ number of vendors able to cause that freeze rather than providing a fallback.
 
 So the result is three-state, not boolean:
 
-  blocked       a reviewer found a CRITICAL, or the gate could not be answered
-  degraded      answered, but by fewer reviewers than were asked to run
-  clear         answered by every reviewer that was asked to run
+  blocked       a reviewer found a CRITICAL, a reviewer that was asked to run
+                was skipped, or every reviewer crashed
+  degraded      passed, but with less review than the repo is configured for
+  clear         every reviewer that was asked to run returned a verdict
 
 `degraded` still passes the check. It is a pass with a named deficit, and it is
 reported loudly (annotation + job summary + a machine-readable `result` output
@@ -49,10 +50,18 @@ ERRORED = "errored"              # the job did not complete
 SKIPPED = "skipped"              # asked to run and did not — a configuration fault
 NOT_REQUIRED = "not-required"    # never asked to run (fork / bot / not enabled)
 
-# States that mean this reviewer answered the question it was asked.
-_ANSWERED = frozenset({CLEAR, NO_DIFF, UNKNOWN_OUTCOME})
-# States that mean this reviewer was asked and did not answer, without fault.
-_MISSING = frozenset({FAILED_OPEN, ERRORED})
+# A verdict: this reviewer looked (or had nothing to look at) and said so.
+_VERDICT = frozenset({CLEAR, NO_DIFF, UNKNOWN_OUTCOME})
+# Completed, but deliberately without a verdict. The reviewer action fails open
+# on transient provider errors and posts a PR comment saying the change was not
+# reviewed. That posture predates this gate and is not overturned here: it is
+# what stops a broad provider outage from freezing every consuming repo. It
+# counts as "the job did not fail", never as "the change was reviewed".
+_FAILED_OPEN = frozenset({FAILED_OPEN})
+# Asked to run and produced nothing at all, not even a fail-open.
+_ERRORED = frozenset({ERRORED})
+# Everything the gate must report as reduced coverage.
+_MISSING = _FAILED_OPEN | _ERRORED
 
 # ── Gate results ──────────────────────────────────────────────────────────────
 
@@ -154,13 +163,15 @@ def evaluate(reviewers) -> Decision:
         )
         return Decision(NOT_REQUIRED_RESULT, "not-required", states, tuple(messages))
 
-    answered = sorted(n for n in required if states[n] in _ANSWERED)
+    verdicts = sorted(n for n in required if states[n] in _VERDICT)
+    failed_open = sorted(n for n in required if states[n] in _FAILED_OPEN)
     missing = sorted(n for n in required if states[n] in _MISSING)
 
-    if not answered:
-        # Nobody reviewed anything. This is the genuine "the gate could not run"
-        # state and it must never collapse into a pass: with no verdict from any
-        # reviewer there is no evidence either way.
+    if not verdicts and not failed_open:
+        # Every reviewer that was asked to run crashed. Nothing completed, no
+        # warning comment was posted on the PR, and there is no record anywhere
+        # that the change went unreviewed. This is the genuine "the gate could
+        # not run" state and it must never collapse into a silent pass.
         for name in missing:
             messages.append(
                 f"::error::The {name} adversarial review did not complete "
@@ -173,12 +184,25 @@ def evaluate(reviewers) -> Decision:
         )
         return Decision(BLOCKED, "no-reviewer-completed", states, tuple(messages))
 
+    if not verdicts:
+        # Every reviewer failed open. The reviewer action already passes in this
+        # state and comments on the PR to say the change was not reviewed; that
+        # is deliberate, and tightening it would freeze every consuming repo
+        # during a broad provider outage. Preserved, and no longer silent.
+        messages.append(
+            "::warning::Every adversarial reviewer failed open on a provider error "
+            f"({', '.join(failed_open)}) — this PR has NOT been reviewed. The gate "
+            "passes so a provider outage does not freeze the repo; re-run the "
+            "workflow once the provider is available."
+        )
+        return Decision(DEGRADED, "no-reviewer-produced-a-verdict", states, tuple(messages))
+
     if missing:
         for name in missing:
             messages.append(
-                f"::warning::The {name} adversarial review did not complete "
+                f"::warning::The {name} adversarial review produced no verdict "
                 f"({states[name]}) — this PR was reviewed by "
-                f"{', '.join(answered)} only."
+                f"{', '.join(verdicts)} only."
             )
         messages.append(
             "::warning::Adversarial review gate passed DEGRADED — fewer reviewers "

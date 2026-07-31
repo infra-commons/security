@@ -30,6 +30,10 @@ name: Adversarial review (reusable)
 # able to freeze the repo, while reading like redundancy.
 #
 # A CRITICAL from *either* reviewer still blocks. That is not loosened here.
+#
+# RELEASE ORDER: the gate job calls `adversarial-review-gate@adversarial-review-gate/v1`.
+# That tag must exist before any caller pins a SHA at or after this commit, or the
+# gate job fails to resolve the action and every PR in the caller blocks.
 
 # Default all permissions to none — each job declares exactly what it needs.
 # This prevents future jobs added without explicit permissions from inheriting
@@ -117,9 +121,9 @@ jobs:
     steps:
       # The decision is a Python script inside a composite action, not inline
       # bash, because it is the only thing standing between a review and a
-      # merge and its degraded paths need to be reachable by a unit test. This
-      # gate's worst failure mode had been observed three times in production
-      # and never once in a test, precisely because it was unreachable shell.
+      # merge and its degraded paths have to be reachable by a unit test. As
+      # inline shell they were reachable only in production, which is where
+      # this gate's worst failure mode kept being discovered.
       - name: Evaluate findings
         id: evaluate
         uses: infra-commons/security/.github/actions/adversarial-review-gate@adversarial-review-gate/v1
