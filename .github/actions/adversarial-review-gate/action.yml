@@ -1,0 +1,76 @@
+name: Adversarial review gate
+description: >-
+  Combines the adversarial reviewer jobs' outcomes into a three-state gate
+  result (clear / degraded / blocked) and fails the step when it blocks.
+
+inputs:
+  claude-result:
+    description: "needs.<claude job>.result"
+    required: true
+  claude-has-critical:
+    description: "needs.<claude job>.outputs.has_critical"
+    required: false
+    default: ""
+  claude-outcome:
+    description: "needs.<claude job>.outputs.outcome"
+    required: false
+    default: ""
+  openai-result:
+    description: "needs.<openai job>.result"
+    required: false
+    default: "skipped"
+  openai-has-critical:
+    description: "needs.<openai job>.outputs.has_critical"
+    required: false
+    default: ""
+  openai-outcome:
+    description: "needs.<openai job>.outputs.outcome"
+    required: false
+    default: ""
+  run-openai:
+    description: "Whether the OpenAI reviewer was asked to run"
+    required: false
+    default: "false"
+  is-fork:
+    description: "Whether the PR head is a fork (reviewers cannot see secrets)"
+    required: false
+    default: "false"
+  is-dependabot:
+    description: "Whether the PR author is Dependabot"
+    required: false
+    default: "false"
+
+outputs:
+  result:
+    description: "clear | degraded | blocked | not-required"
+    value: ${{ steps.evaluate.outputs.result }}
+  reason:
+    description: "Machine-readable reason for the result"
+    value: ${{ steps.evaluate.outputs.reason }}
+  degraded:
+    description: "true when the gate passed with fewer reviewers than configured"
+    value: ${{ steps.evaluate.outputs.degraded }}
+  unavailable:
+    description: "Comma-separated reviewers that were asked to run and produced no verdict"
+    value: ${{ steps.evaluate.outputs.unavailable }}
+
+runs:
+  using: composite
+  steps:
+    # No checkout and no pip install: the script is stdlib-only and lives in
+    # this action's own directory. The gate is the last thing standing between
+    # a review and a merge, so it depends on as little as possible.
+    - name: Evaluate adversarial review outcomes
+      id: evaluate
+      shell: bash
+      env:
+        CLAUDE_RESULT: ${{ inputs.claude-result }}
+        CLAUDE_HAS_CRITICAL: ${{ inputs.claude-has-critical }}
+        CLAUDE_OUTCOME: ${{ inputs.claude-outcome }}
+        OPENAI_RESULT: ${{ inputs.openai-result }}
+        OPENAI_HAS_CRITICAL: ${{ inputs.openai-has-critical }}
+        OPENAI_OUTCOME: ${{ inputs.openai-outcome }}
+        RUN_OPENAI: ${{ inputs.run-openai }}
+        IS_FORK: ${{ inputs.is-fork }}
+        IS_DEPENDABOT: ${{ inputs.is-dependabot }}
+      run: python3 "$GITHUB_ACTION_PATH/gate.py"

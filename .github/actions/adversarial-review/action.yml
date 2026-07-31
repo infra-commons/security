@@ -31,6 +31,13 @@ outputs:
   has_critical:
     description: "true if the review found CRITICAL findings"
     value: ${{ steps.run.outputs.has_critical }}
+  outcome:
+    description: >-
+      What the reviewer actually did — reviewed | no-diff | api-error. The gate
+      needs this because the action fails open on transient provider errors, so
+      `has_critical=false` alone does not distinguish a clean review from a
+      review that never happened.
+    value: ${{ steps.run.outputs.outcome }}
 
 runs:
   using: composite
