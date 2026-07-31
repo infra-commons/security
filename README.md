@@ -92,14 +92,51 @@ refs on a `<family>/vN` tag (see `.github/scripts/check-action-pins.sh`); our ow
 These are the internal pins we own end-to-end, so the risk a SHA pin protects against
 (a third party rewriting history under us) doesn't apply.
 
-**To ship a composite fix:** cut a new immutable release tag (`<family>/vX.Y.Z`) on the
-commit with the fix, then move `<family>/v1` to point at it — e.g.
-`git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`.
-That's it: **zero** edits to the reusable or any consumer. Every caller that pins the
-reusable at a post-adoption SHA (or `@main`) picks up the fix on its next run. This
-replaces the old failure mode (2026-07-02, PRs #20/#21) where a reusable's inner SHA pin
-silently lagged a composite fix because bumping it was a separate, easy-to-forget manual
-step — and it removes the per-composite SHA-bump churn that motivated this change.
+**To ship a composite fix: merge it.** `release-composites.yml` cuts the immutable
+`<family>/vX.Y.Z` release tag and moves `<family>/v1` for you, on `main`, once the `Tests`
+workflow passes. There are **zero** edits to the reusable or any consumer, and no manual
+tag step. Every caller that pins the reusable at a post-adoption SHA (or `@main`) picks up
+the fix on its next run.
+
+This used to be a manual step, documented here as
+`git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`. It
+was introduced to replace the pre-2026-07-02 failure mode (PRs #20/#21) where a reusable's
+inner SHA pin silently lagged a composite fix "because bumping it was a separate,
+easy-to-forget manual step", and it reproduced that failure mode exactly, because moving
+a tag by hand is also a separate, easy-to-forget manual step, and a *less* visible one: a
+stale inner SHA at least showed up in a diff, whereas an unmoved tag shows up nowhere. By
+2026-07-31 six of the seven families were behind `main`, one of them by two weeks, and
+nothing anywhere was red.
+
+Two mechanisms now hold the property, deliberately separate:
+
+| | What it does | When |
+|---|---|---|
+| `release-composites.yml` (`release` job) | moves the tags | after `Tests` passes on `main` |
+| `check_composite_tags_released.py` (`verify` job) | asserts every `<family>/vN` tag's action directory is byte-identical to `main`'s | after each release, plus daily and on demand |
+
+The verifier is not decoration. A release mechanism reporting its own success is the
+mechanism vouching for itself; the verifier re-reads the tags from the remote and compares
+content. It also runs on a schedule, so if the release chain breaks (`Tests` renamed,
+disabled, or no longer running on `main`) that is caught within a day rather than
+presenting as the same silence as everything working.
+
+**Tags are never moved before merge.** The release runs on `push` to `main`, so the commit
+a tag lands on is always merged. Repointing a moving tag at a pre-merge commit is a
+recorded hazard (2026-07-21) and is structurally unreachable here.
+
+**There is no manual fallback, by design.** Two active tag rulesets enforce this:
+
+| Ruleset | Applies to | Bypass |
+|---|---|---|
+| `protect-moving-tags` | `refs/tags/*/v1` | the `infra-commons-bot` App, and nothing else |
+| `protect-immutable-tags` | every other tag | nobody at all |
+
+So `git push -f origin <family>/v1` from a laptop is rejected, whoever runs it, and has
+been since the rulesets were created on 2026-07-29. The release job mints an
+`infra-commons-bot` token precisely because it is the only identity the ruleset permits.
+A released `<family>/vX.Y.Z` can never be moved or deleted by anyone, which is what makes
+"pin away from a bad release" a real option rather than a hope.
 
 ## `pentest/` — internal penetration-test toolkit
 
