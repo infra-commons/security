@@ -49,24 +49,16 @@ jobs:
           && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      # Moving a tag is a write. The `protect-moving-tags` ruleset then decides
+      # whether this identity may force-update `refs/tags/*/v1`; `github-actions`
+      # (app id 15368) is on its bypass list for exactly that reason. Creating the
+      # immutable `<family>/vX.Y.Z` tag needs no bypass: `protect-immutable-tags`
+      # restricts update, deletion and non-fast-forward, not creation.
+      contents: write
     steps:
-      # The moving tags are protected by the `protect-moving-tags` ruleset, whose
-      # only bypass actor is the `infra-commons-bot` App. GITHUB_TOKEN cannot move
-      # them however much `contents: write` it is granted, and neither can a human
-      # on the command line: the README's documented
-      # `git push -f origin <family>/v1` has been rejected for everyone since the
-      # ruleset was created on 2026-07-29. Minting the App token is not a
-      # convenience here, it is the only identity permitted to release.
-      - name: Mint releaser App token
-        id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.SHARED_INFRA_APP_ID }}
-          private-key: ${{ secrets.SHARED_INFRA_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ steps.app.outputs.token }}
           # Tags and history are the input: the release compares the action
           # directory's tree at HEAD against its tree at the moving tag.
           fetch-depth: 0

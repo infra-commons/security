@@ -127,16 +127,25 @@ recorded hazard (2026-07-21) and is structurally unreachable here.
 
 **There is no manual fallback, by design.** Two active tag rulesets enforce this:
 
-| Ruleset | Applies to | Bypass |
-|---|---|---|
-| `protect-moving-tags` | `refs/tags/*/v1` | the `infra-commons-bot` App, and nothing else |
-| `protect-immutable-tags` | every other tag | nobody at all |
+| Ruleset | Applies to | Restricts | Bypass |
+|---|---|---|---|
+| `protect-moving-tags` | `refs/tags/*/v1` | update, deletion, non-fast-forward | `infra-commons-bot`, and `github-actions` for the release job |
+| `protect-immutable-tags` | every other tag | update, deletion, non-fast-forward | nobody at all |
 
 So `git push -f origin <family>/v1` from a laptop is rejected, whoever runs it, and has
-been since the rulesets were created on 2026-07-29. The release job mints an
-`infra-commons-bot` token precisely because it is the only identity the ruleset permits.
-A released `<family>/vX.Y.Z` can never be moved or deleted by anyone, which is what makes
-"pin away from a bad release" a real option rather than a hope.
+been since the rulesets were created on 2026-07-29. There is no hand fallback and there is
+not meant to be one.
+
+Neither ruleset restricts tag **creation**, so cutting a new `<family>/vX.Y.Z` needs no
+bypass. Only the moving tag's force-update does, which is why `github-actions` is on that
+one list and nothing else changed. A released `<family>/vX.Y.Z` can never be moved or
+deleted by anyone, which is what makes "pin away from a bad release" a real option rather
+than a hope.
+
+This repo is **public**, so its workflows cannot read the organisation's private-visibility
+secrets. That rules out authenticating the release as an App here without putting an App
+private key in a public repo's secret scope, and `workflow_run` is a fork-reachable trigger
+class. Running as `GITHUB_TOKEN` with a ruleset bypass keeps the release secretless.
 
 ## `pentest/` — internal penetration-test toolkit
 
