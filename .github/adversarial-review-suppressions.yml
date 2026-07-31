@@ -7,18 +7,27 @@
 # private repo's own .github/adversarial-review-suppressions.yml.
 #
 # Format:
-#   - id: kebab-slug          # unique; canonical ids win over same-id repo-local entries
-#     pattern: "regex"        # matched against the finding's file path
-#     finding: "regex"        # matched against finding text (case-insensitive)
-#     reason: >              # why this is a false positive for this architecture
+#   - id: kebab-slug            # unique; canonical ids win over same-id repo-local entries
+#     file_pattern: "regex"     # matched against the finding's `location` (case-insensitive)
+#     finding_pattern: "regex"  # matched against title + description (case-insensitive)
+#     reason: >                 # why this is a false positive for this architecture
 #       Explanation.
-#     expires: YYYY-MM-DD    # omit for permanent architectural decisions
+#     expires: YYYY-MM-DD       # omit for permanent architectural decisions
+#
+# WARNING: `file_pattern` is matched against `location`, NOT against a bare path. capture.py's
+# reviewer prompt specifies `"location": "path/to/file:line_number"`, so a real finding's
+# location ALWAYS carries a `:line` (or `:line-line`) suffix. A pattern ending in a bare `$`
+# therefore anchors before that suffix and can never match anything — the entry reads as
+# active and suppresses nothing. End anchored patterns with `(:\d+(-\d+)?)?$` instead.
+# 10 of the 14 entries below were dead this way until 2026-07-31 (infra-commons/security#53);
+# test_suppression_matching.py in .github/actions/capture-findings/ now proves every entry can
+# match, against this repo's real tracked files and through the real matcher.
 
 suppressions:
 
   # ── CI/CD supply-chain: SHA pins ─────────────────────────────────────────────
   - id: sha-pin-first-party-workflows
-    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(external org commit hash|unpinned.{0,30}commit|commit hash without code visibility|[Uu]npinned external.*reusable)"
     reason: >
       Reusable workflows are intentionally pinned to immutable SHAs from first-party repos
@@ -29,7 +38,7 @@ suppressions:
 
   # ── CI/CD supply-chain: security.yml push trigger ────────────────────────────
   - id: security-push-trigger-intentional
-    file_pattern: ".*\\.github/workflows/security\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/security\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(push.*triggers.*all branch|push.*including forks|push: ?\\{\\})"
     reason: >
       The security.yml push: {} trigger runs security scans on all branch pushes by design
@@ -38,7 +47,7 @@ suppressions:
 
   # ── CI/CD permissions: issues:write on adversarial-review job ────────────────
   - id: issues-write-adversarial-review-intentional
-    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(issues.*write.*without.*justification|added.*issues.*write.*adversarial|issues.*write.*permission.*adversarial)"
     reason: >
       The adversarial-review job requires issues: write so the gate job can open a tracking
@@ -47,7 +56,7 @@ suppressions:
 
   # ── Supply-chain: first-party reusable workflow trust boundary ───────────────
   - id: first-party-reusable-workflow-trust
-    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(reusable workflow.{0,80}(external|third-party|separate org|untrusted|potentially untrusted)|(external|separate) (org|repo).{0,40}(supply.?chain|trust boundary|ownership)|org/repo trust not verifiable|without verified ownership)"
     reason: >
       All reusable workflows are SHA-pinned to first-party repos: infra-commons/{security,legal}
@@ -57,7 +66,7 @@ suppressions:
 
   # ── Supply-chain: ANTHROPIC_API_KEY to first-party AI-review reusables ────────
   - id: anthropic-key-to-first-party-reusable
-    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "ANTHROPIC_API_KEY.{0,60}(passed|secret|to).{0,40}(reusable workflow|external|third-party|infra-commons)"
     reason: >
       ANTHROPIC_API_KEY is intentionally passed to first-party infra-commons/{security,legal}
@@ -67,7 +76,7 @@ suppressions:
 
   # ── Static caller inputs to first-party legal reusables (jurisdictions/max_files)
   - id: static-input-to-first-party-legal-reusable
-    file_pattern: ".*\\.github/workflows/legal-codebase-(audit|scan)\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/legal-codebase-(audit|scan)\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(user-controlled|unsanitised|unsanitized).{0,60}(input|jurisdictions|max_files).{0,40}(external|reusable workflow)"
     reason: >
       jurisdictions and max_files are static, caller-authored literals committed in first-party
@@ -76,7 +85,7 @@ suppressions:
 
   # ── issues:write on first-party legal-codebase-audit reusable ────────────────
   - id: issues-write-legal-codebase-audit-intentional
-    file_pattern: ".*\\.github/workflows/legal-codebase-audit\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/legal-codebase-audit\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "issues.{0,20}write.{0,60}(external|externally-controlled).{0,20}reusable workflow"
     reason: >
       legal-codebase-audit grants issues: write so the first-party reusable can file tracked
@@ -84,7 +93,7 @@ suppressions:
 
   # ── Suppression governance (self-authored suppression findings) ──────────────
   - id: suppression-file-governed-by-audit
-    file_pattern: ".*adversarial-review-suppressions\\.ya?ml$"
+    file_pattern: ".*adversarial-review-suppressions\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(self-authored suppression|suppression (bypasses|masks|removes)|AI agent.{0,40}suppress)"
     reason: >
       Suppressions are governed, not unchecked: canonical entries require an infra-commons/security
@@ -96,7 +105,7 @@ suppressions:
 
   # ── First-party reusable SHA bumps are reviewed upgrades, not drift ──────────
   - id: first-party-reusable-sha-bump
-    file_pattern: ".*\\.github/workflows/.*\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/.*\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(SHA bump|SHA changed|unverified sha).{0,60}(reusable|third-party|action|without documented review)"
     reason: >
       A reusable-workflow/action SHA bump is an intentional, PR-reviewed upgrade of a first-party
@@ -126,7 +135,7 @@ suppressions:
 
   # ── Class 6: the AI review PR comment IS the human oversight gate ──────────
   - id: human-oversight-gate-by-design
-    file_pattern: ".*\\.github/workflows/security\\.ya?ml$"
+    file_pattern: ".*\\.github/workflows/security\\.ya?ml(:\\d+(-\\d+)?)?$"
     finding_pattern: "(AI|automated).{0,40}(review|analysis|finding).{0,80}without.{0,40}(documented|human oversight|oversight gate|human review)|review.{0,40}comment.{0,40}without.{0,40}(oversight|human)"
     reason: >
       The adversarial-review and legal-review jobs post findings as PR comments that a human
