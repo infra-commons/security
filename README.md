@@ -127,16 +127,30 @@ recorded hazard (2026-07-21) and is structurally unreachable here.
 
 **There is no manual fallback, by design.** Two active tag rulesets enforce this:
 
-| Ruleset | Applies to | Bypass |
-|---|---|---|
-| `protect-moving-tags` | `refs/tags/*/v1` | the `infra-commons-bot` App, and nothing else |
-| `protect-immutable-tags` | every other tag | nobody at all |
+| Ruleset | Applies to | Restricts | Bypass |
+|---|---|---|---|
+| `protect-moving-tags` | `refs/tags/*/v1` | deletion | `infra-commons-bot` |
+| `protect-immutable-tags` | every other tag | update, deletion, non-fast-forward | nobody at all |
 
 So `git push -f origin <family>/v1` from a laptop is rejected, whoever runs it, and has
-been since the rulesets were created on 2026-07-29. The release job mints an
-`infra-commons-bot` token precisely because it is the only identity the ruleset permits.
-A released `<family>/vX.Y.Z` can never be moved or deleted by anyone, which is what makes
-"pin away from a bad release" a real option rather than a hope.
+been since the rulesets were created on 2026-07-29. There is no hand fallback and there is
+not meant to be one.
+
+Neither ruleset restricts tag **creation**, so cutting a new `<family>/vX.Y.Z` needs no
+permission beyond `contents: write`.
+
+**The integrity guarantee lives in the immutable tags, not the moving one.** A released
+`<family>/vX.Y.Z` can never be moved or deleted by anyone, which is what makes "pin away
+from a bad release" a real option rather than a hope. The moving tag is a pointer that is
+supposed to move, so it keeps only its `deletion` rule: it cannot vanish and break every
+consumer at once, but the release job can advance it.
+
+That shape exists because this repo is **public** and so cannot read the organisation's
+private-visibility secrets, which rules out running the release as an App without putting
+an App private key in a public repo's secret scope. GitHub Actions cannot be granted a
+ruleset bypass either, since it is not an installed org integration. Running as
+`GITHUB_TOKEN` keeps the release secretless, and the only other principals who can move a
+moving tag are the two accounts that already have admin on this repo.
 
 ## `pentest/` — internal penetration-test toolkit
 
