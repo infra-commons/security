@@ -49,6 +49,27 @@ jobs:
           && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The human gate, and the only one on this path. Automating the release
+    # removed the step that was being forgotten, but it also removed the last
+    # deliberate act between an edit here and 13+ repos' merge gates: the moving
+    # tags are consumed by production callers with no per-caller pin bump to
+    # review, and `protect-moving-tags` keeps only its `deletion` rule so nothing
+    # else stands in the way. Tests passing is a statement about this repo; it is
+    # not a decision to ship to the fleet. This environment makes someone take
+    # that decision, at the moment the fleet is actually reached.
+    #
+    # It must exist with its `required_reviewers` rule BEFORE this line merges: a
+    # workflow naming an environment that does not exist gets one auto-created
+    # with no protection rules, which reads exactly like a gate and is none.
+    # Created 2026-08-01, reviewer `kev-rolliq`.
+    #
+    # `prevent_self_review` is deliberately OFF. Only two identities have access
+    # here, and the automation account authors and merges most changes; with
+    # self-review prevented, a release triggered by the reviewer's own merge
+    # would be unsatisfiable — the same unsatisfiable-approval deadlock this
+    # repo's `required_reviews: 1` already suffers from. The property wanted is
+    # that a human deliberately releases, not that a second person does.
+    environment: fleet-release
     permissions:
       # Moving a tag is a write, and this runs as GITHUB_TOKEN rather than as an
       # App. That is a deliberate choice, not a shortcut: this repo is public, so
