@@ -61,7 +61,9 @@ jobs:
     # It must exist with its `required_reviewers` rule BEFORE this line merges: a
     # workflow naming an environment that does not exist gets one auto-created
     # with no protection rules, which reads exactly like a gate and is none.
-    # Created 2026-08-01, reviewer `kev-rolliq`.
+    # Created 2026-08-01. The reviewer list lives in the environment's settings
+    # and is deliberately not repeated here — a copy in a comment is a second
+    # source that can silently disagree with the one being enforced.
     #
     # `prevent_self_review` is deliberately OFF. Only two identities have access
     # here, and the automation account authors and merges most changes; with
