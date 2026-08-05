@@ -869,6 +869,26 @@ def aggregate_title(source: str) -> str:
     return f"[Security][{source}] Weekly MEDIUM/LOW summary"
 
 
+# Every title this scan can ever generate — `build_issue_title` and
+# `aggregate_title` both — begins with this prefix.
+_SCANNER_TITLE_PREFIX = "[Security]["
+
+
+def is_scanner_authored_title(title: str) -> bool:
+    """Whether this scan could have opened an issue with this title.
+
+    The auto-close pass reasons by absence: a title missing from the current
+    run's expected set is treated as resolved. That inference only holds for
+    issues this scan authored. A hand-filed issue's title can never match a
+    generated one, so absence is guaranteed rather than informative — without
+    this check every human-filed `security`-labelled issue is closed by the
+    next Sunday run, with a comment reading "was not detected", which is
+    indistinguishable from "was fixed". See infra-commons/security#65: eight
+    issues across two repos were closed that way, none of them fixed.
+    """
+    return title.startswith(_SCANNER_TITLE_PREFIX)
+
+
 # ── GitHub API helpers ─────────────────────────────────────────────────────────
 
 def _gh_headers(token: str) -> dict[str, str]:
@@ -1287,6 +1307,12 @@ def run_create_issues() -> None:
     if not issues_truncated:
         for title, issue in open_issues.items():
             label_names = {lbl["name"] for lbl in issue.get("labels", [])}
+            if not is_scanner_authored_title(title):
+                # Hand-filed: this scan neither opened it nor can detect it, so
+                # its absence from `expected_titles` says nothing at all. The
+                # label-based skips below are the same rule discovered one
+                # source at a time; this is the general form.
+                continue
             if "source:azure-defender" in label_names:
                 continue  # Azure Defender issues managed separately
             if "source:adversarial-ai" in label_names:
