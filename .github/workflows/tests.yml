@@ -127,6 +127,28 @@ jobs:
         # dead pattern to that file fails here rather than being found by the weekly audit.
         run: python -m pytest .github/actions/suppression-audit -q
 
+  weekly-security-scan:
+    name: weekly-security-scan unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # `security-scan.py` imports httpx at module scope, so importing the module
+        # under test needs it even though every network call is monkeypatched out.
+        run: pip install pytest==8.3.4 httpx==0.28.1
+
+      - name: Run tests
+        # This action can CLOSE issues in every consuming repo, and it had no test
+        # job at all until infra-commons/security#65 — where the auto-close pass was
+        # found closing hand-filed issues it never opened.
+        run: python -m pytest .github/actions/weekly-security-scan -q
+
   composite-release:
     name: composite release tooling unit tests
     runs-on: ubuntu-latest
