@@ -1,0 +1,37 @@
+name: Auto-assign
+
+# Puts every pull request opened here on somebody's plate, mechanically.
+#
+# A convention held only in an operator's head binds nothing: an unassigned PR looks
+# exactly like an assigned one from the outside, so nobody notices when it reaches no
+# queue. This is the mechanism that makes it observable.
+#
+# Who gets assigned comes from the PR_ASSIGNEE organisation variable, falling back to the
+# pull request's author when it is unset. The login lives in the variable rather than in
+# this file because several repos in this fleet are public and a login is a personal
+# identifier — change it once per org and every adopting repo moves together:
+#   gh api /orgs/<org>/actions/variables/PR_ASSIGNEE
+#
+# The job-level `permissions:` block is REQUIRED. A called workflow may never hold more
+# permission than its caller, so without it the run fails at startup — and a
+# `startup_failure` produces NO check-run at all, not a red one, which reads as "not wired
+# up yet" rather than "broken". See infra-commons/devops#18.
+#
+# Deliberately NOT a required check: it has no opinion on whether the change is good, and a
+# required check that can fail on an API hiccup buys nothing. Dependabot is skipped by the
+# reusable's default, and an existing assignee is never overwritten.
+#
+# Pinned by SHA, not @main, so a merge to infra-commons/devops cannot silently change what
+# runs on this repo's pull requests.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  assign:
+    uses: infra-commons/devops/.github/workflows/auto-assign-reusable.yml@a06613b4272b27649f4bbd863b684daa7961be92
+    permissions:
+      pull-requests: write
