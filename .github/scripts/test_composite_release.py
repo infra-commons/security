@@ -8,6 +8,7 @@ tag is behind, and that discovery going wrong fails rather than passes vacuously
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +66,56 @@ def test_this_repo_still_has_pins_to_check():
     pins = check.discover_pins(REPO_ROOT)
     assert pins, "no own-composite moving-tag pins discovered in this repo"
     assert "adversarial-review" in pins
+
+
+# ── every released family is actually tested ──────────────────────────────────
+
+_TESTS_WORKFLOW = REPO_ROOT / ".github/workflows/tests.yml"
+
+
+def test_every_pinned_family_has_a_test_job():
+    """A family with no tests still ships to the fleet, and looks exactly like
+    one that is covered.
+
+    `release-composites.yml` gates the release on the `Tests` workflow, but that
+    gate says nothing about a family with no job in it: such a family releases on
+    OTHER families' tests passing. `auto-merge-churn` and `weekly-security-scan`
+    were both in that state (infra-commons/security#61) — the second was found
+    only when it closed issues it had never opened (#65).
+
+    Asserted on the pytest invocation rather than on a job named after the
+    family, because running the tests is the property that matters; a job could
+    be renamed, or exist and run nothing, and a name check would not notice.
+    Stdlib-only on purpose: this job installs no yaml parser, deliberately.
+    """
+    pins = check.discover_pins(REPO_ROOT)
+    workflow = _TESTS_WORKFLOW.read_text(encoding="utf-8")
+
+    missing = [
+        family for family in sorted(pins)
+        if not re.search(
+            rf"pytest\s+\.github/actions/{re.escape(family)}(?:\s|$)",
+            workflow,
+            re.MULTILINE,
+        )
+    ]
+    assert not missing, (
+        f"these composite families are released to the fleet with no test job of "
+        f"their own: {missing}. Add a job to tests.yml running "
+        f"`pytest .github/actions/<family>`, or stop pinning the family."
+    )
+
+
+def test_the_test_job_check_would_notice_an_untested_family():
+    """The guard's own negative control. Without this, a regex that never matched
+    anything would report every family as covered — a filter that never fires
+    and a filter that found nothing wrong render identically."""
+    workflow = _TESTS_WORKFLOW.read_text(encoding="utf-8")
+    assert not re.search(
+        r"pytest\s+\.github/actions/not-a-real-family(?:\s|$)", workflow
+    ), "the fixture family must not exist"
+    # ...and the pattern does match a family that IS covered, so the regex works.
+    assert re.search(r"pytest\s+\.github/actions/adversarial-review(?:\s|$)", workflow)
 
 
 # ── evaluate ──────────────────────────────────────────────────────────────────
