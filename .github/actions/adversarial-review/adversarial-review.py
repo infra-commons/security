@@ -13,12 +13,19 @@ and invoked by the `adversarial-review-reusable` reusable workflow.
 Writes two values to $GITHUB_OUTPUT for the separate gate job:
 
   has_critical  true|false — the verdict, set on every path that completes
-  outcome       reviewed|no-diff|api-error — what actually happened
+  outcome       reviewed|no-diff|api-error|quota-exhausted — what actually happened
 
 Both are needed. A transient provider error fails open (has_critical=false) so
 one vendor's outage does not freeze every merge; `outcome` is what stops that
 fail-open from reading as a clean review. A non-transient error propagates and
 fails the job, which the gate sees as a reviewer that did not complete.
+
+`quota-exhausted` is split out from `api-error` because the two deserve
+different answers. A rate limit is transient — the next run reviews the change.
+An exhausted spend budget is not: left on the transient path, every subsequent
+PR merges unreviewed and green for the rest of the billing period. The gate
+fails open on the first such PR and blocks afterwards, so the first change is
+not held up and the tenth is not merged unreviewed.
 
 Required env vars:
   PROVIDER         anthropic | openai
@@ -876,8 +883,66 @@ def post_comment(token: str, repo: str, pr_number: int, body: str) -> None:
 
 # ── Infra error handling ───────────────────────────────────────────────────────
 
+# Markers a provider uses to say "your money has run out", as opposed to "you
+# are going too fast". Deliberately exact phrases rather than a bare "quota":
+# over-matching here converts an ordinary rate limit into a merge block on its
+# second occurrence, which is a self-inflicted freeze. Under-matching only
+# leaves today's behaviour in place. So this errs toward under-matching.
+_QUOTA_MARKERS = (
+    "credit balance is too low",        # Anthropic, 400 invalid_request_error
+    "insufficient_quota",               # OpenAI, 429 error code
+    "exceeded your current quota",      # OpenAI, 429 message
+    "billing_hard_limit_reached",       # OpenAI, hard cap
+)
+
+
+def _is_quota_error(provider: str, exc: Exception) -> bool:
+    """True if exc says the account's spend/credit budget is exhausted.
+
+    This is a different event from a rate limit, and the difference is the
+    whole point. A rate limit is transient: the next run reviews the change,
+    so failing open costs a delay. An exhausted budget is not transient — once
+    hit, every subsequent PR would fail open and merge unreviewed, green, for
+    as long as the billing period lasts. That is the one case where "fail open
+    so an outage does not freeze the repo" stops being a temporary degradation
+    and becomes an indefinite, silent absence of review.
+
+    It is separated from `_is_infra_error` rather than added to it because the
+    two need different gate responses, and because the vendors disagree about
+    which HTTP status to use: Anthropic signals exhaustion with a 400 (which
+    today propagates and hard-fails the job — the loud direction, seen in
+    cashbucket-com on 2026-08-06) while OpenAI signals it with a 429 that
+    `_is_infra_error` already matches as a RateLimitError (the quiet
+    direction). Today's outcome therefore depends on which status the vendor
+    chose rather than on whether the change was reviewed. This makes both
+    vendors take the same path.
+    """
+    text = str(exc).lower()
+    if not any(marker in text for marker in _QUOTA_MARKERS):
+        return False
+    # Only trust the marker when it came from the provider's own error type.
+    # A RuntimeError whose message happens to contain the phrase is not a
+    # billing signal, and must not be able to escalate the gate.
+    try:
+        if provider == "anthropic":
+            import anthropic as _ant
+            return isinstance(exc, _ant.APIStatusError)
+        if provider == "openai":
+            import openai as _oai
+            return isinstance(exc, _oai.APIStatusError)
+    except ImportError:  # pragma: no cover — the SDK is installed by action.yml
+        return False
+    return False
+
+
 def _is_infra_error(provider: str, exc: Exception) -> bool:
-    """True if exc is a quota/rate-limit/transient API error — fail open, not a security finding."""
+    """True if exc is a rate-limit/transient API error — fail open, not a security finding.
+
+    Callers must check `_is_quota_error` FIRST. OpenAI reports an exhausted
+    budget as a `RateLimitError`, which this matches, so checking this first
+    would route budget exhaustion onto the transient path and silently keep it
+    there for the rest of the billing period.
+    """
     if provider == "anthropic":
         import anthropic as _ant
         if isinstance(exc, (_ant.RateLimitError, _ant.APIConnectionError, _ant.APITimeoutError)):
@@ -893,15 +958,41 @@ def _is_infra_error(provider: str, exc: Exception) -> bool:
     return False
 
 
-def _post_infra_warning(token: str, repo: str, pr_number: int, label: str, marker: str, exc: Exception) -> None:
-    """Post a PR comment warning that the review was skipped due to an API infra error."""
+def _post_infra_warning(
+    token: str, repo: str, pr_number: int, label: str, marker: str, exc: Exception,
+    quota: bool = False,
+) -> None:
+    """Post a PR comment warning that the review was skipped.
+
+    `quota=True` names the cause as an exhausted budget and says what actually
+    clears it. The distinction matters on the PR, not only in the gate: "re-run
+    once the API is available" is useless advice for a spend cap — re-running
+    changes nothing until somebody tops up the account, and a reader who
+    follows it learns nothing except that the retry also failed.
+    """
+    if quota:
+        headline = f"## Adversarial AI Security Review — {label} (skipped: provider quota exhausted)"
+        explanation = (
+            f"> **Review could not complete** — the {label} account's credit/spend budget is "
+            f"exhausted.\n"
+            f"> **This PR has not been reviewed for security issues.**\n"
+            f"> Unlike a rate limit, this does not clear on its own: re-running will keep "
+            f"failing until the account is topped up or its spend cap is raised.\n"
+            f"> The gate passes for the *first* such PR only. While the tracking issue stays "
+            f"open, subsequent PRs will be **blocked** rather than merged unreviewed."
+        )
+    else:
+        headline = f"## Adversarial AI Security Review — {label} (skipped: API error)"
+        explanation = (
+            f"> **Review could not complete** — the {label} API returned an infrastructure error.\n"
+            f"> The gate has passed to avoid blocking on operational failures, "
+            f"but **this PR has not been reviewed for security issues.**\n"
+            f"> Re-run the workflow once the API is available, or request a manual review."
+        )
     body = (
         f"{marker}\n"
-        f"## Adversarial AI Security Review — {label} (skipped: API error)\n\n"
-        f"> **Review could not complete** — the {label} API returned an infrastructure error.\n"
-        f"> The gate has passed to avoid blocking on operational failures, "
-        f"but **this PR has not been reviewed for security issues.**\n"
-        f"> Re-run the workflow once the API is available, or request a manual review.\n\n"
+        f"{headline}\n\n"
+        f"{explanation}\n\n"
         f"**Error:** `{str(exc)[:300]}`\n\n"
         f"---\n"
         f"*Posted by the adversarial-review workflow*"
@@ -970,6 +1061,18 @@ def main() -> None:
     try:
         review = run_review(provider, api_key, model, diff, context, system_prompt)
     except Exception as exc:
+        # Quota is checked FIRST. OpenAI reports an exhausted budget as a
+        # RateLimitError, which `_is_infra_error` matches, so the other order
+        # would route budget exhaustion onto the transient path and leave it
+        # there silently for the rest of the billing period.
+        if _is_quota_error(provider, exc):
+            print(f"WARNING: provider quota exhausted — failing open once: {exc}", file=sys.stderr)
+            _post_infra_warning(token, repo, pr_number, label, marker, exc, quota=True)
+            set_github_output("has_critical", "false")
+            # Distinct from `api-error`: the gate escalates a repeat of this to
+            # a block, and must not escalate an ordinary rate limit the same way.
+            set_github_output("outcome", "quota-exhausted")
+            return
         if _is_infra_error(provider, exc):
             print(f"WARNING: API infrastructure error — failing open: {exc}", file=sys.stderr)
             _post_infra_warning(token, repo, pr_number, label, marker, exc)

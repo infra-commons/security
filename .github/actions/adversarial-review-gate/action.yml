@@ -39,6 +39,17 @@ inputs:
     description: "Whether the PR author is Dependabot"
     required: false
     default: "false"
+  quota-marker-open:
+    description: >-
+      Whether a tracking issue for a previous quota-exhausted run is still open
+      in this repo. This is the durable memory behind "fail open once, then
+      block": with it false the first quota-exhausted PR degrades and passes,
+      with it true a subsequent one is blocked rather than merged unreviewed.
+      Defaults to "false", which is the safe default for a caller that has not
+      wired the lookup — it preserves today's fail-open behaviour rather than
+      blocking on a signal the caller never supplies.
+    required: false
+    default: "false"
 
 outputs:
   result:
@@ -53,6 +64,12 @@ outputs:
   unavailable:
     description: "Comma-separated reviewers that were asked to run and produced no verdict"
     value: ${{ steps.evaluate.outputs.unavailable }}
+  quota_exhausted:
+    description: >-
+      true when a reviewer reported its provider budget exhausted. The caller
+      uses this to open (or keep open) the tracking issue that becomes the next
+      run's `quota-marker-open`.
+    value: ${{ steps.evaluate.outputs.quota_exhausted }}
 
 runs:
   using: composite
@@ -73,4 +90,5 @@ runs:
         RUN_OPENAI: ${{ inputs.run-openai }}
         IS_FORK: ${{ inputs.is-fork }}
         IS_DEPENDABOT: ${{ inputs.is-dependabot }}
+        QUOTA_MARKER_OPEN: ${{ inputs.quota-marker-open }}
       run: python3 "$GITHUB_ACTION_PATH/gate.py"

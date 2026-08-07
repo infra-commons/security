@@ -33,10 +33,14 @@ outputs:
     value: ${{ steps.run.outputs.has_critical }}
   outcome:
     description: >-
-      What the reviewer actually did — reviewed | no-diff | api-error. The gate
-      needs this because the action fails open on transient provider errors, so
-      `has_critical=false` alone does not distinguish a clean review from a
-      review that never happened.
+      What the reviewer actually did — reviewed | no-diff | api-error |
+      quota-exhausted. The gate needs this because the action fails open on
+      transient provider errors, so `has_critical=false` alone does not
+      distinguish a clean review from a review that never happened.
+      `quota-exhausted` is reported separately from `api-error`: a rate limit
+      clears by itself, an exhausted spend budget does not, so the gate blocks
+      on a repeat of the latter rather than passing every PR unreviewed for the
+      rest of the billing period.
     value: ${{ steps.run.outputs.outcome }}
 
 runs:

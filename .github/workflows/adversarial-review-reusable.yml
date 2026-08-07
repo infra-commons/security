@@ -31,6 +31,21 @@ name: Adversarial review (reusable)
 #
 # A CRITICAL from *either* reviewer still blocks. That is not loosened here.
 #
+# ── The one case where a repeat tightens: an exhausted provider budget ───────
+# Failing open on a rate limit and failing open on an exhausted spend budget are
+# not the same trade. A rate limit is transient — the next run reviews the
+# change. A budget is not: left on the transient path, every subsequent PR would
+# merge unreviewed and green for as long as the billing period lasts.
+#
+# So a `quota-exhausted` outcome degrades on the FIRST PR (which still passes,
+# so billing lapsing does not hold up the change in front of it) and BLOCKS
+# afterwards. The memory that tells first from subsequent is a tracking issue in
+# the calling repo, opened by this workflow and read back on the next run.
+# Closing that issue — after topping up the account — re-arms the single pass.
+#
+# The block requires that NO reviewer produced a verdict. If a second provider
+# reviewed the change, the change was reviewed and this does not fire.
+#
 # RELEASE ORDER: the gate job calls `adversarial-review-gate@adversarial-review-gate/v1`.
 # That tag must exist before any caller pins a SHA at or after this commit, or the
 # gate job fails to resolve the action and every PR in the caller blocks.
@@ -119,6 +134,30 @@ jobs:
     permissions:
       issues: write
     steps:
+      # The durable memory behind "fail open once, then block". A job has no
+      # state of its own, so the record that a previous PR already passed
+      # unreviewed on an exhausted budget lives in an issue — visible to a
+      # human, and closable by one, which is what re-arms the free pass.
+      #
+      # This step only READS. It must not fail the job: an inability to look up
+      # the marker is not a reason to block a merge, and `|| true` plus the
+      # empty default means an error here degrades to today's fail-open
+      # behaviour rather than to a repo-wide freeze.
+      - name: Look up the quota tracking issue
+        id: quota_marker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          TITLE="[security] Adversarial review: provider quota exhausted"
+          COUNT=$(gh issue list --repo "$REPO" --search "\"${TITLE}\" in:title" \
+                    --state open --json number --jq 'length' 2>/dev/null || echo "")
+          if [ "${COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # The decision is a Python script inside a composite action, not inline
       # bash, because it is the only thing standing between a review and a
       # merge and its degraded paths have to be reachable by a unit test. As
@@ -137,6 +176,35 @@ jobs:
           run-openai: ${{ inputs.run-openai }}
           is-fork: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           is-dependabot: ${{ github.actor == 'dependabot[bot]' }}
+          quota-marker-open: ${{ steps.quota_marker.outputs.open }}
+
+      # Opened on the FIRST quota-exhausted PR, which is the one the gate lets
+      # through. Its existence is what blocks the second, so this must run even
+      # when the gate step failed — `always()` is load-bearing here, not
+      # decoration. Deduplicated by title, so a repeat does not pile up issues.
+      - name: Record that the provider quota is exhausted
+        if: ${{ always() && steps.evaluate.outputs.quota_exhausted == 'true' && github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          UNAVAILABLE: ${{ steps.evaluate.outputs.unavailable }}
+        run: |
+          TITLE="[security] Adversarial review: provider quota exhausted"
+          EXISTING=$(gh issue list --repo "$REPO" --search "\"${TITLE}\" in:title" \
+                       --state open --json number --jq 'length')
+          if [ "${EXISTING}" -gt "0" ]; then
+            echo "Quota tracking issue already open — leaving it as the block signal."
+            exit 0
+          fi
+          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n\n---\n%s' \
+            "## The adversarial reviewer's provider budget is exhausted" \
+            "[PR #${PR_NUMBER}](${PR_URL}) passed **without being reviewed**, because these reviewers reported an exhausted quota: **${UNAVAILABLE}**." \
+            "Unlike a rate limit, this does not clear by itself. **While this issue is open, further PRs will be BLOCKED** rather than merged unreviewed — that is deliberate: the first change is not held up, the tenth is not shipped unreviewed." \
+            "**To restore review:** top up the provider account or raise its spend cap, confirm a review runs, then close this issue. Closing it re-arms the one-time pass." \
+            "_Created automatically by the \`adversarial-review / gate\` workflow._")
+          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY"
 
       # A degraded pass renders in the checks UI exactly like a full pass, so
       # without a durable record nobody learns that a merge happened on fewer
