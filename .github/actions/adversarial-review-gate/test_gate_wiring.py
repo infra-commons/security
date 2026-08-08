@@ -71,13 +71,39 @@ def test_both_reviewer_jobs_publish_the_outcome_the_gate_reads():
         assert "outputs.outcome" in str(outputs["outcome"])
 
 
+def _emitted_outcomes() -> set:
+    script = (_ROOT / ".github/actions/adversarial-review/adversarial-review.py").read_text()
+    return set(re.findall(r'set_github_output\("outcome", "([a-z-]+)"\)', script))
+
+
 def test_the_reviewer_action_publishes_outcome_and_the_script_sets_it():
     assert "outcome" in _load(_REVIEW_ACTION)["outputs"]
-    script = (_ROOT / ".github/actions/adversarial-review/adversarial-review.py").read_text()
-    emitted = set(re.findall(r'set_github_output\("outcome", "([a-z-]+)"\)', script))
     # Every path that leaves main() having written has_critical must also say
     # what it did; a path that writes one and not the other is the silent case.
-    assert emitted == {"reviewed", "no-diff", "api-error"}, emitted
+    assert _emitted_outcomes() == {
+        "reviewed", "no-diff", "api-error", "quota-exhausted"
+    }, _emitted_outcomes()
+
+
+def test_the_gate_understands_every_outcome_the_reviewer_can_emit():
+    """The release-ordering hazard, as an assertion.
+
+    The reviewer and the gate ship as two separate moving tags. If the reviewer
+    starts emitting an outcome the gate has no branch for, `classify()` falls
+    through to UNKNOWN_OUTCOME — which counts as a *completed review*. A new
+    outcome meaning "this was not reviewed" would then read as "reviewed",
+    which is worse than the behaviour it replaced and completely silent.
+
+    Pinning both halves of the vocabulary together is what makes that a red
+    test here rather than a green merge and a discovery in production.
+    """
+    gate_source = (_ROOT / ".github/actions/adversarial-review-gate/gate.py").read_text()
+    understood = set(re.findall(r'reviewer\.outcome == "([a-z-]+)"', gate_source))
+    missing = _emitted_outcomes() - understood
+    assert not missing, (
+        f"the reviewer emits {sorted(missing)} but the gate has no branch for it, "
+        f"so it would be classified as a completed review"
+    )
 
 
 def test_the_degraded_record_step_is_conditioned_on_the_gate_output():
