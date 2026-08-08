@@ -32,15 +32,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  # Tag moves are last-write-wins. Serialise them so two pushes cannot race and
-  # leave a tag pointing at the older of the two.
-  group: release-composites
-  cancel-in-progress: false
+# NOTE: the concurrency group is deliberately declared on the `release` job and
+# NOT here. A workflow-level group covers `verify` too, and `verify` is the
+# heartbeat — it takes no lock, moves nothing, and only reads tags, so
+# serialising it against tag moves buys nothing and costs the heartbeat its
+# life. With `cancel-in-progress: false` a queued run is not the leader, and
+# only one run may be queued per group, so each nightly heartbeat became the
+# queued run that the next arrival cancelled. An unapproved release therefore
+# suppressed the one check that reports releases are not happening — the single
+# failure this workflow exists to catch was the failure that disabled it.
+# See infra-commons/security#68.
 
 jobs:
   release:
     name: Move moving tags to main
+    concurrency:
+      # Tag moves are last-write-wins. Serialise them so two pushes cannot race
+      # and leave a tag pointing at the older of the two. Scoped to this job so
+      # the lock covers the thing that actually takes it.
+      group: release-composites
+      cancel-in-progress: false
     # `workflow_run` fires on failure too; releasing off a red test run is the
     # one thing this job must never do.
     if: >-
@@ -117,6 +128,10 @@ jobs:
     if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # Reading this workflow's own run list, for the stuck-approval check below.
+      actions: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -130,3 +145,18 @@ jobs:
 
       - name: Check every composite is released
         run: python .github/scripts/check_composite_tags_released.py
+
+      - name: Check no release is stuck awaiting approval
+        # The step above proves the tags landed. This proves nothing is silently
+        # queued behind a human who did not notice they were being asked: a run
+        # left `waiting` on `fleet-release` reports nowhere, and every composite
+        # merged behind it stays unreleased while `main` reads as shipped.
+        #
+        # `if: always()` because a stale tag and a stuck approval are usually the
+        # same incident, and the stuck approval is the *explanation*. Skipping it
+        # when the check above fails would withhold the diagnosis exactly when it
+        # is needed.
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/check_release_not_stuck.py
