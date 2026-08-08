@@ -36,6 +36,7 @@ Required env vars:
   BASE_SHA         Base commit SHA of the PR
   HEAD_SHA         Head commit SHA of the PR
 """
+import hashlib
 import os
 import re
 import subprocess
@@ -871,6 +872,94 @@ def delete_previous_comments(token: str, repo: str, pr_number: int, marker: str)
                     )
 
 
+# ── Review cache ───────────────────────────────────────────────────────────────
+#
+# One model call per push, on every open PR, is roughly twice what the reviews
+# are worth: measured over 200 runs in one repo, 2.15 calls per merged PR, about
+# half of them on a diff a later push replaces. That inference shares an
+# Anthropic workspace with the promote gate and /code-review, and workspace
+# exhaustion has frozen every merge in the fleet twice — so this is not only a
+# cost question, it is upstream of the failure #58 handles.
+#
+# The predicate here is the narrow one: THIS EXACT DIFF HAS ALREADY BEEN
+# REVIEWED. Identical input, identical review, so there is no coverage cost and
+# no vocabulary to get wrong. It catches the cases that are pure waste — a
+# force-push that only rewrites a commit message, a rebase that changes no
+# content, a re-run.
+#
+# The key deliberately covers more than the diff. The verdict is a function of
+# the diff AND the prompt the model saw AND which model saw it, so a suppression
+# edit (which lands in the system prompt) or a model change must MISS the cache.
+# Keying on the diff alone would serve a verdict computed under rules that no
+# longer apply, which is the kind of stale-but-plausible answer that is worse
+# than no cache at all.
+
+_CACHE_RE = re.compile(
+    r"<!--\s*adversarial-review-cache v1 "
+    r"key=(?P<key>[0-9a-f]{64}) critical=(?P<critical>true|false)\s*-->"
+)
+
+
+def review_cache_key(provider: str, model: str, system_prompt: str, diff: str) -> str:
+    """Identity of a review's inputs. Any change to any of them is a miss."""
+    digest = hashlib.sha256()
+    for part in (provider, model, system_prompt, diff):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\x00")  # unambiguous separator, so parts cannot run together
+    return digest.hexdigest()
+
+
+def cache_marker(key: str, critical: bool) -> str:
+    return (
+        f"<!-- adversarial-review-cache v1 key={key} "
+        f"critical={'true' if critical else 'false'} -->"
+    )
+
+
+def find_cached_verdict(bodies, marker: str, key: str):
+    """The stored verdict for `key`, or None when this diff has not been reviewed.
+
+    Scans only comments carrying this provider's own marker, so the Claude
+    reviewer can never read the OpenAI reviewer's verdict back as its own.
+    """
+    for body in bodies:
+        if marker not in body:
+            continue
+        match = _CACHE_RE.search(body)
+        if match and match.group("key") == key:
+            return match.group("critical") == "true"
+    return None
+
+
+def fetch_comment_bodies(token: str, repo: str, pr_number: int) -> list:
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
+        resp = client.get(
+            f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments",
+            headers=_gh_headers(token),
+            params={"per_page": 100},
+        )
+        resp.raise_for_status()
+        return [c.get("body", "") for c in resp.json()]
+
+
+def _note_cache_hit(label: str, key: str) -> None:
+    """Make the skip visible. A skipped review and a clean review otherwise
+    render identically — a green gate and nothing else — so a repo whose PR-time
+    review had switched itself off could not tell without reading run logs."""
+    print(f"{label}: cache HIT for diff {key[:12]} — reusing the previous verdict, no model call.")
+    path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(
+            f"### ♻️ {label} adversarial review — served from cache\n\n"
+            f"This exact diff (and the same suppressions, prompt and model) was already "
+            f"reviewed on this PR, so no model call was made. The verdict and the existing "
+            f"review comment stand.\n\n"
+            f"Cache key: `{key[:16]}…`\n"
+        )
+
+
 def post_comment(token: str, repo: str, pr_number: int, body: str) -> None:
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         resp = client.post(
@@ -1056,6 +1145,30 @@ def main() -> None:
             "file(s) touch a high-risk path. Findings will be posted but cannot fail the gate."
         )
 
+    # Has this exact diff, under this exact prompt and model, already been
+    # reviewed on this PR? A lookup failure is never a reason to skip OR to
+    # block — it degrades to doing the review, which is the status quo.
+    cache_key = review_cache_key(provider, model, system_prompt, diff)
+    cached_critical = None
+    try:
+        cached_critical = find_cached_verdict(
+            fetch_comment_bodies(token, repo, pr_number), marker, cache_key
+        )
+    except Exception as exc:
+        print(f"Warning: could not read the review cache: {exc}", file=sys.stderr)
+
+    if cached_critical is not None:
+        _note_cache_hit(label, cache_key)
+        # Recomputed rather than cached: `blocking` is a property of this run's
+        # configuration, not of the diff, so a reviewer whose blocking scope
+        # changed must not inherit the old gate signal.
+        set_github_output("has_critical", "true" if (cached_critical and blocking) else "false")
+        set_github_output("outcome", "reviewed")
+        # Deliberately no comment churn: the existing comment IS the verdict for
+        # this diff, and deleting and reposting it would lose its thread position
+        # and re-notify every subscriber for a review that did not rerun.
+        return
+
     context = get_repo_context()
     print(f"Running adversarial review (provider={provider}, model={model}, diff={len(diff)} chars) …")
     try:
@@ -1117,6 +1230,7 @@ def main() -> None:
 
     comment_body = (
         f"{marker}\n"
+        f"{cache_marker(cache_key, critical)}\n"
         f"## Adversarial AI Security Review ({label} {model})\n\n"
         f"> **AI-generated by {label} {model}** — treat findings as a starting point, not a final verdict.\n"
         f"> Dismiss only after confirming a finding is mitigated or a false positive.\n"
