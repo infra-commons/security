@@ -26,6 +26,15 @@ Anything else is a silent no-op — the PR simply waits for Kevin as before.
     they naturally fall through (daily-health-check already handles the
     minor/patch dependabot lane; dependabot is listed here only for parity).
 
+── Why the decision is a pure function ─────────────────────────────────────
+`decide()` takes everything it needs as arguments and touches neither the
+environment nor the network, so every branch is reachable from a unit test.
+This action decides which PRs get auto-approved and auto-merged across 13+
+repos, and until infra-commons/security#61 it had no tests at all: the module
+read `os.environ[...]` at import, so it could not even be imported without a
+full CI environment. The same split is used by adversarial-review-gate/gate.py
+for the same reason.
+
 Required env vars:
   GH_TOKEN       gh CLI token (approve + merge rights; caller resolves App vs
                  GITHUB_TOKEN fallback before invoking this script)
@@ -40,11 +49,7 @@ import os
 import re
 import subprocess
 import sys
-
-REPO   = os.environ["GH_REPO"]
-NUM    = os.environ["PR_NUMBER"]
-AUTHOR = os.environ["PR_AUTHOR"]
-RUN    = os.environ.get("RUN_URL", "")
+from dataclasses import dataclass, field
 
 ALLOWED_AUTHORS = {"rolliqdotcom", "infra-commons-bot", "dependabot[bot]"}
 
@@ -61,8 +66,8 @@ DEFAULT_ALLOW = [
     ".github/*-suppressions.yml",
     ".github/confidential-terms-allow.txt",
 ]
-extra = [g.strip() for g in os.environ.get("ALLOWED_GLOBS", "").splitlines() if g.strip()]
-ALLOW = DEFAULT_ALLOW + extra
+
+EXCLUDED_REPOS = {"clients-config"}
 
 
 def glob_to_re(pat: str) -> "re.Pattern":
@@ -80,8 +85,7 @@ def glob_to_re(pat: str) -> "re.Pattern":
     return re.compile("".join(out))
 
 
-HARD_RE  = [glob_to_re(p) for p in HARD_EXCLUDE]
-ALLOW_RE = [glob_to_re(p) for p in ALLOW]
+HARD_RE = [glob_to_re(p) for p in HARD_EXCLUDE]
 
 # Suppression files carry accepted-risk edits. When one documents an accepted
 # CRITICAL, the legal/adversarial gate stays red BY DESIGN — a suppression
@@ -95,51 +99,109 @@ ALLOW_RE = [glob_to_re(p) for p in ALLOW]
 SUPPRESSION_RE = glob_to_re(".github/*-suppressions.yml")
 
 
+@dataclass(frozen=True)
+class Decision:
+    """What to do with this PR, and why.
+
+    `eligible` gates the approval. `enable_auto_merge` is a SEPARATE decision:
+    a suppression PR is approved but must never have auto-merge enabled, so the
+    two must not be collapsed into one boolean.
+    """
+    eligible: bool
+    reason: str
+    basis: str = ""
+    enable_auto_merge: bool = False
+    suppression_files: tuple = field(default_factory=tuple)
+
+
+def precheck(repo: str, author: str):
+    """The rejections that need no API call, or None to keep going.
+
+    Split out so `main()` can skip the `gh pr view` for an unlisted author
+    without re-implementing the test — two copies of this rule could disagree,
+    and the copy that runs in production would be the one nobody tested.
+    """
+    if repo.split("/")[-1] in EXCLUDED_REPOS:
+        return Decision(False, "clients-config is excluded entirely")
+    if author not in ALLOWED_AUTHORS:
+        return Decision(False, f"author {author!r} not in allowlist")
+    return None
+
+
+def decide(repo: str, author: str, files, labels, extra_globs=()) -> Decision:
+    """Pure eligibility decision. No environment, no network, no side effects."""
+    early = precheck(repo, author)
+    if early is not None:
+        return early
+
+    files = list(files)
+    if not files:
+        # An empty file list means the API told us nothing, not that the PR is
+        # harmless. Approving on no evidence is the one thing this must not do.
+        return Decision(False, "no changed files reported")
+
+    hit = next((f for f in files for rx in HARD_RE if rx.match(f)), None)
+    if hit:
+        return Decision(False, f"guardrail: changed file {hit!r} is a hard-exclusion")
+
+    allow_re = [glob_to_re(p) for p in list(DEFAULT_ALLOW) + list(extra_globs)]
+    all_allowed = all(any(rx.match(f) for rx in allow_re) for f in files)
+    has_autofix = "autofix:security" in set(labels)
+    if not (all_allowed or has_autofix):
+        offending = [f for f in files if not any(rx.match(f) for rx in allow_re)]
+        return Decision(
+            False,
+            "not eligible — no autofix:security label and these files are "
+            f"outside the allowlist: {offending}",
+        )
+
+    basis = "autofix:security label" if has_autofix else "all files within path allowlist"
+    supp = tuple(f for f in files if SUPPRESSION_RE.match(f))
+    return Decision(
+        eligible=True,
+        reason=f"eligible ({basis})",
+        basis=basis,
+        # See SUPPRESSION_RE: approve, but leave the manual bypass button intact.
+        enable_auto_merge=not supp,
+        suppression_files=supp,
+    )
+
+
 def gh_json(*args):
     r = subprocess.run(["gh", *args], capture_output=True, text=True, check=True)
     return json.loads(r.stdout)
 
 
-def noop(reason: str) -> None:
-    print(f"auto-merge-churn: NO-OP — {reason}")
-    sys.exit(0)
-
-
 def main() -> None:
-    # Belt-and-braces: never touch clients-config even if wired by mistake.
-    if REPO.split("/")[-1] == "clients-config":
-        noop("clients-config is excluded entirely")
+    repo = os.environ["GH_REPO"]
+    num = os.environ["PR_NUMBER"]
+    author = os.environ["PR_AUTHOR"]
+    run_url = os.environ.get("RUN_URL", "")
+    extra = [g.strip() for g in os.environ.get("ALLOWED_GLOBS", "").splitlines() if g.strip()]
 
-    if AUTHOR not in ALLOWED_AUTHORS:
-        noop(f"author {AUTHOR!r} not in allowlist")
+    # Cheap checks first, so a PR from an unlisted author costs no API call.
+    early = precheck(repo, author)
+    if early is not None:
+        print(f"auto-merge-churn: NO-OP — {early.reason}")
+        return
 
-    data  = gh_json("pr", "view", NUM, "--repo", REPO, "--json", "files,labels")
+    data = gh_json("pr", "view", num, "--repo", repo, "--json", "files,labels")
     files = [f["path"] for f in data.get("files", [])]
-    labels = {l["name"] for l in data.get("labels", [])}
+    labels = [lbl["name"] for lbl in data.get("labels", [])]
 
-    if not files:
-        noop("no changed files reported")
+    decision = decide(repo, author, files, labels, extra)
+    if not decision.eligible:
+        print(f"auto-merge-churn: NO-OP — {decision.reason}")
+        return
 
-    hit = next((f for f in files for rx in HARD_RE if rx.match(f)), None)
-    if hit:
-        noop(f"guardrail: changed file {hit!r} is a hard-exclusion")
-
-    all_allowed = all(any(rx.match(f) for rx in ALLOW_RE) for f in files)
-    has_autofix = "autofix:security" in labels
-    if not (all_allowed or has_autofix):
-        offending = [f for f in files if not any(rx.match(f) for rx in ALLOW_RE)]
-        noop("not eligible — no autofix:security label and these files are "
-             f"outside the allowlist: {offending}")
-
-    basis = "autofix:security label" if has_autofix else "all files within path allowlist"
-    print(f"auto-merge-churn: ELIGIBLE ({basis}) — approving #{NUM} in {REPO}")
+    print(f"auto-merge-churn: ELIGIBLE ({decision.basis}) — approving #{num} in {repo}")
 
     # Approve (satisfies reviews:1; bot != PR author so it counts).
     try:
         subprocess.run(
-            ["gh", "pr", "review", NUM, "--repo", REPO, "--approve", "--body",
-             f"Auto-approved by auto-merge-churn ({basis}). "
-             f"Required checks still gate the merge. Run: {RUN}"],
+            ["gh", "pr", "review", num, "--repo", repo, "--approve", "--body",
+             f"Auto-approved by auto-merge-churn ({decision.basis}). "
+             f"Required checks still gate the merge. Run: {run_url}"],
             capture_output=True, text=True, check=True)
         print("  approved")
     except subprocess.CalledProcessError as exc:
@@ -149,19 +211,15 @@ def main() -> None:
         else:
             print(f"  WARNING: approval failed: {exc.stderr.strip()[:120]}", file=sys.stderr)
 
-    # Suppression PRs: approve (done above) but never enable auto-merge, so the
-    # manual bypass button stays available for an accepted-CRITICAL merge whose
-    # legal/adversarial gate is red by design. See SUPPRESSION_RE.
-    supp = [f for f in files if SUPPRESSION_RE.match(f)]
-    if supp:
-        print(f"  suppression file(s) touched ({supp}); leaving auto-merge OFF so the "
-              "manual bypass button stays available. Approved only.")
+    if not decision.enable_auto_merge:
+        print(f"  suppression file(s) touched ({list(decision.suppression_files)}); leaving "
+              "auto-merge OFF so the manual bypass button stays available. Approved only.")
         return
 
     # Enable native auto-merge — merges only once required checks pass.
     try:
         subprocess.run(
-            ["gh", "pr", "merge", NUM, "--repo", REPO, "--auto", "--squash"],
+            ["gh", "pr", "merge", num, "--repo", repo, "--auto", "--squash"],
             capture_output=True, text=True, check=True)
         print("  auto-merge enabled (squash)")
     except subprocess.CalledProcessError as exc:

@@ -63,6 +63,30 @@ jobs:
       - name: Run tests
         run: python -m pytest .github/actions/adversarial-review-gate -q
 
+  auto-merge-churn:
+    name: auto-merge-churn unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # `auto-merge-churn.py` is stdlib-only: it decides which PRs are
+        # auto-approved and auto-merged, so it should not be able to break on a
+        # dependency resolution.
+        run: pip install pytest==8.3.4
+
+      - name: Run tests
+        # This action auto-approves and enables auto-merge across 13+ repos, and
+        # had no test job at all until infra-commons/security#61 — so its
+        # automated release was gated on OTHER families' tests passing, which is
+        # not a gate on anything about it.
+        run: python -m pytest .github/actions/auto-merge-churn -q
+
   capture-findings:
     name: capture-findings unit tests
     runs-on: ubuntu-latest
