@@ -27,9 +27,16 @@ Safety properties, in the order they matter:
   alone and the job is a no-op on the overwhelming majority of pushes.
 * **Idempotent.** Re-running on an unchanged `main` releases nothing.
 
-It deliberately does not release a family whose directory is unchanged, even if
-other files moved, because the moving tag's only promise is about the code its
-consumers execute.
+It deliberately does not release a family whose shipped surface is unchanged,
+even if other files moved, because the moving tag's only promise is about the
+code its consumers execute.
+
+That surface is BOTH the composite action and the reusable workflow the family
+owns (`.github/workflows/<family>-reusable.yml`) — see `surface_paths`. It was
+the action directory alone until infra-commons/security#63, which held the
+promise for consumers pinning the action and broke it for consumers resolving
+the reusable at the same tag. A reusable-only change advanced nothing, and
+nothing anywhere said so.
 """
 
 from __future__ import annotations
@@ -44,8 +51,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from check_composite_tags_released import (  # noqa: E402
     ACTIONS_DIR,
+    discover_families,
     discover_pins,
     git,
+    surface_hashes,
+    surface_paths,
     tree_at,
 )
 
@@ -79,21 +89,25 @@ def main() -> int:
     dry_run = os.environ.get("DRY_RUN", "").lower() in {"1", "true", "yes"}
 
     head = git("rev-parse", "HEAD", cwd=root)
-    pins = discover_pins(root)
+    pins = discover_families(root)
     if not pins:
         print(
-            "::error::Found no own-composite moving-tag pins. Refusing to run: a "
-            "release job that silently releases nothing is worse than one that fails."
+            "::error::Found no releasable families. Refusing to run: a release "
+            "job that silently releases nothing is worse than one that fails."
         )
         return 1
 
     released: list[str] = []
     for family, moving_tag in sorted(pins.items()):
-        head_tree = tree_at("HEAD", f"{ACTIONS_DIR}/{family}", root)
-        tag_tree = tree_at(moving_tag, f"{ACTIONS_DIR}/{family}", root)
+        paths = surface_paths(family, root)
+        head_tree = surface_hashes("HEAD", family, root, paths)
+        tag_tree = surface_hashes(moving_tag, family, root, paths)
 
-        if head_tree is None:
-            print(f"::error::{family}: pinned at `{moving_tag}` but has no directory at HEAD")
+        if not paths or all(v is None for v in head_tree.values()):
+            print(
+                f"::error::{family}: released at `{moving_tag}` but ships nothing at "
+                f"HEAD — no {ACTIONS_DIR}/{family} directory and no reusable workflow"
+            )
             return 1
         if head_tree == tag_tree:
             print(f"{family}: already released at `{moving_tag}`, nothing to do")
@@ -122,7 +136,7 @@ def main() -> int:
         # locally. The whole class of bug this repo keeps hitting is a release
         # that reports success without landing.
         git("fetch", "--force", "origin", f"refs/tags/{moving_tag}:refs/tags/{moving_tag}", cwd=root)
-        landed = tree_at(moving_tag, f"{ACTIONS_DIR}/{family}", root)
+        landed = surface_hashes(moving_tag, family, root, paths)
         if landed != head_tree:
             print(
                 f"::error::{family}: pushed `{moving_tag}` but the remote tag still "
