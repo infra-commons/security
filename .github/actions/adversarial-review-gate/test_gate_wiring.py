@@ -12,6 +12,7 @@ fail-open as a real review and report a clean review that never happened.
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -119,3 +120,52 @@ def test_the_gate_job_can_file_the_issues_it_creates():
     # Both issue-filing steps run in the gate job; without this permission they
     # fail at runtime and the record the degraded path depends on never appears.
     assert _load(_WORKFLOW)["jobs"]["gate"]["permissions"]["issues"] == "write"
+
+
+def _step_run(name: str) -> str:
+    steps = _load(_WORKFLOW)["jobs"]["gate"]["steps"]
+    matches = [s for s in steps if s.get("name") == name]
+    assert matches, f"no gate step named {name!r}"
+    return str(matches[0]["run"])
+
+
+# A title is plain text: anyone who can open an issue in the caller repo can write
+# one with this exact string, before the gate ever runs, for a PR number they only
+# have to guess. If the gate's own "does this already exist" check matches on the
+# title alone, the squatter's issue satisfies it, the real issue is never created,
+# and closing the squatter's issue afterwards leaves a clean, COMPLETE, empty
+# result for anything reading these issues back — see
+# infra-commons/meta#566's scripts/merge-ready.py, which does exactly that to
+# decide whether a PR merges unread. A title match is not enough; the dedupe must
+# also require a label that only this job's own token can attach.
+@pytest.mark.parametrize("step_name, label", [
+    ("Record a degraded pass", "security:degraded-pass"),
+    ("Create tracking issue for critical findings", "security:critical-findings"),
+])
+def test_the_issue_filing_steps_dedupe_on_a_label_the_step_itself_applies(step_name, label):
+    run = _step_run(step_name)
+    assert f'LABEL="{label}"' in run, (
+        f"{step_name!r} does not assign LABEL={label!r} — the checks below "
+        f"read $LABEL, so a missing/renamed assignment would silently defeat them"
+    )
+    assert 'label:\\"${LABEL}\\"' in run, (
+        f"{step_name!r}'s existence check matches on title text alone — "
+        f"an issue with the right title but no {label!r} label (which an "
+        f"unprivileged issue-opener cannot attach) would satisfy it and "
+        f"suppress the real issue"
+    )
+    assert '--label "$LABEL"' in run, (
+        f"{step_name!r} never applies {label!r} to the issue it creates, so "
+        f"its own dedupe above could never find its own past issues"
+    )
+
+
+def test_the_degraded_pass_title_still_matches_the_downstream_consumer_contract():
+    # infra-commons/meta#566 added a consumer (sharedinfra/scripts/merge-ready.py,
+    # `_DEGRADED_ISSUE_TITLE_RE`) that parses the PR number out of this exact
+    # title shape. The label-based dedupe added alongside this test must never
+    # change the title — that is what keeps the fix backward-compatible with a
+    # consumer this repo cannot see or edit from here. If this test goes red,
+    # the change belongs in a coordinated PR against sharedinfra, not here.
+    run = _step_run("Record a degraded pass")
+    assert 'TITLE="[security] Adversarial review passed degraded on PR #${PR_NUMBER}"' in run

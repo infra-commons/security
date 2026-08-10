@@ -208,8 +208,46 @@ jobs:
 
       # A degraded pass renders in the checks UI exactly like a full pass, so
       # without a durable record nobody learns that a merge happened on fewer
-      # reviews than the repo is configured for. One issue per PR, deduplicated
-      # by title the same way the critical-findings issue is.
+      # reviews than the repo is configured for. One issue per PR.
+      #
+      # Deduplicated on a LABEL this step applies itself, not on title text alone.
+      # A title is plain text: opening an issue needs no special privilege, so
+      # anyone could pre-file "[security] Adversarial review passed degraded on
+      # PR #<N>" for a PR number they only have to guess, BEFORE this step runs.
+      # A title-only existence check would find that squatted issue, skip
+      # creating the real one, and — once the squatter closes theirs — leave
+      # infra-commons/meta#566's consumer (sharedinfra/scripts/merge-ready.py,
+      # which reads open issues back to decide whether a PR merges unread) with
+      # a clean, COMPLETE, empty result for a PR that was genuinely degraded.
+      # `issues: write` on this job's token is what an outside issue-opener does
+      # not have, so requiring the label closes exactly that gap.
+      #
+      # The FORGE direction is deliberately left open by this: anyone can still
+      # open an issue with the right title (and no label) for a PR that was
+      # NEVER degraded, and merge-ready.py's title-only regex would still read
+      # it as one, forcing a spurious T2 hold. That is the fail-safe direction —
+      # worst case an operator reads a clean PR by hand — and closing it means
+      # merge-ready.py itself checking for this label too, which is a separate,
+      # already-tracked, consumer-side change and not done here.
+      #
+      # TITLE is unchanged from before this label was added — that is what keeps
+      # this backward-compatible with #566's consumer without any coordinated
+      # landing order: the old signal never stops being emitted, so there is no
+      # window where a reader that only understands the old signal goes blind.
+      #
+      # This still dedupes via `gh issue list --search`, i.e. GitHub's search
+      # INDEX, same as before — not the primary-API read merge-ready.py
+      # deliberately uses instead to avoid index lag (see its own comments on
+      # `fetch_degraded_pass_prs`). That staleness surface is pre-existing here,
+      # not introduced by the label, and is unchanged by this fix: worst case on
+      # a lagging index is a duplicate issue for the same PR, not a suppressed
+      # one, so it is left as-is rather than folded into this change.
+      #
+      # The label name carries a colon (`security:degraded-pass`), matching this
+      # fleet's namespaced-label convention. Verified directly against the
+      # search API (infra-commons/security#78, created and torn down for this
+      # check) that `label:"ns:value"` — quoted, colon included — parses and
+      # filters correctly rather than silently matching nothing.
       - name: Record a degraded pass
         if: ${{ always() && steps.evaluate.outputs.degraded == 'true' && github.event_name == 'pull_request' }}
         env:
@@ -219,8 +257,19 @@ jobs:
           REPO: ${{ github.repository }}
           UNAVAILABLE: ${{ steps.evaluate.outputs.unavailable }}
         run: |
+          LABEL="security:degraded-pass"
           TITLE="[security] Adversarial review passed degraded on PR #${PR_NUMBER}"
-          EXISTING=$(gh issue list --repo "$REPO" --search "${TITLE}" --state open --json number --jq 'length')
+
+          # Best-effort and idempotent (--force updates rather than errors on a
+          # label that already exists). Its failure must never block the durable
+          # record below — see the fallback `gh issue create` at the bottom.
+          gh label create "$LABEL" --color 5319E7 \
+            --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
+            --force >/dev/null 2>&1 || true
+
+          EXISTING=$(gh issue list --repo "$REPO" \
+            --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
+            --state open --json number --jq 'length')
           if [ "${EXISTING}" -gt "0" ]; then
             echo "Degraded-pass issue already open for PR #${PR_NUMBER} — skipping."
             exit 0
@@ -230,11 +279,14 @@ jobs:
             "[PR #${PR_NUMBER}](${PR_URL}) passed the adversarial review gate, but these reviewers produced no verdict: **${UNAVAILABLE}**." \
             "The gate passes in this state deliberately: a reviewer that did not complete produced no finding to weigh, and blocking every merge on a provider outage costs more than it buys. It is recorded here so the reduced coverage is visible rather than silent. Re-run the workflow once the provider is available if the change warrants a full review." \
             "_Created automatically by the \`adversarial-review / gate\` workflow._")
-          gh issue create \
-            --repo "$REPO" \
-            --title "${TITLE}" \
-            --body "$BODY"
+          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY" --label "$LABEL" \
+            || gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY"
 
+      # Same title-squat exposure as "Record a degraded pass" above, and the
+      # same label-based fix — see that step's comment for the full mechanism.
+      # Lower stakes here specifically because a real CRITICAL still fails the
+      # `claude`/`openai` check independently of this issue existing, so a
+      # suppressed issue loses the tracking record, not the block itself.
       - name: Create tracking issue for critical findings
         if: >-
           ${{ always()
@@ -246,8 +298,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
+          LABEL="security:critical-findings"
           TITLE="[security] Critical findings on PR #${PR_NUMBER}"
-          EXISTING=$(gh issue list --repo "$REPO" --search "${TITLE}" --state open --json number --jq 'length')
+
+          gh label create "$LABEL" --color B60205 \
+            --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
+            --force >/dev/null 2>&1 || true
+
+          EXISTING=$(gh issue list --repo "$REPO" \
+            --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
+            --state open --json number --jq 'length')
           if [ "${EXISTING}" -gt "0" ]; then
             echo "Tracking issue already open for PR #${PR_NUMBER} — skipping."
             exit 0
@@ -257,7 +317,5 @@ jobs:
             "The adversarial AI security review identified **critical findings** on [PR #${PR_NUMBER}](${PR_URL}) that must be resolved before the PR can be merged." \
             "**View findings:** See the adversarial review comment on [PR #${PR_NUMBER}](${PR_URL})." \
             "_Created automatically by the \`adversarial-review / gate\` workflow. Close when the PR is updated and the gate passes._")
-          gh issue create \
-            --repo "$REPO" \
-            --title "${TITLE}" \
-            --body "$BODY"
+          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY" --label "$LABEL" \
+            || gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY"
