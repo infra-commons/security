@@ -381,7 +381,15 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
     message = client.messages.create(
         model=model,
         max_tokens=4096,
-        system=system_prompt,
+        # SYSTEM_PROMPT is static per repo (only ever extended by appended
+        # suppression hints, never shrunk) and comfortably clears the
+        # 1,024-token Sonnet-4.6 cache minimum, so it's cacheable across
+        # consecutive reviews on the same repo within the TTL.
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
     )
     return message.content[0].text
