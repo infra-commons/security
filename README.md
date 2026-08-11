@@ -65,7 +65,6 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 |---|---|
 | `capture-findings-reusable.yml` | Post-merge capture of HIGH/MEDIUM/LOW security findings as GitHub Issues |
 | `legal-review-reusable.yml` | AI legal clause review on PRs |
-| `legal-capture-findings-reusable.yml` | Post-merge capture of legal findings as GitHub Issues |
 | `secret-scan-reusable.yml` | Gitleaks secret scanning |
 | `daily-health-check-reusable.yml` | Daily repo health check (Dependabot triage, failed-run diagnosis, auto-merged-in-last-24h visibility) |
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
