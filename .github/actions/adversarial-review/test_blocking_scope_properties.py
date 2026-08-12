@@ -232,10 +232,13 @@ def test_primary_reviewer_blocks_on_every_changeset(paths):
     assert adv.is_blocking(adv.PROVIDERS["anthropic"], paths) is True
 
 
-@given(safe=st.lists(safe_text, min_size=1, max_size=8))
-def test_second_reviewer_is_advisory_on_changesets_with_no_risky_surface(safe):
-    """The whole point of C2: ordinary diffs get comments, not a blocked merge."""
-    assert adv.is_blocking(adv.PROVIDERS["openai"], safe) is False
+@given(paths=path_lists)
+def test_second_reviewer_blocks_on_every_changeset(paths):
+    """OpenAI is scope "always" too (post infra-commons/meta#630) — no path
+    list may ever make it advisory. Mirrors test_primary_reviewer_blocks_on_
+    every_changeset above; the two providers now have identical blocking
+    semantics."""
+    assert adv.is_blocking(adv.PROVIDERS["openai"], paths) is True
 
 
 def test_every_configured_provider_declares_a_known_scope():

@@ -80,10 +80,13 @@ def test_anthropic_blocks_regardless_of_paths():
     assert adv.is_blocking(cfg, []) is True
 
 
-def test_openai_blocks_only_on_high_risk_paths():
+def test_openai_blocks_regardless_of_paths():
+    # Was test_openai_blocks_only_on_high_risk_paths before blocking_scope
+    # went to "always" (infra-commons/meta#630).
     cfg = adv.PROVIDERS["openai"]
+    assert adv.is_blocking(cfg, ["README.md"]) is True
     assert adv.is_blocking(cfg, ["src/auth/login.py"]) is True
-    assert adv.is_blocking(cfg, ["README.md"]) is False
+    assert adv.is_blocking(cfg, []) is True
 
 
 def test_unknown_scope_fails_closed():

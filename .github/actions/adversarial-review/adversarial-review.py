@@ -65,10 +65,13 @@ PROVIDERS = {
         "model": "gpt-5.5-2026-04-23",
         "label": "OpenAI",
         "marker": "<!-- adversarial-review-openai-bot -->",
-        # The cross-family second opinion blocks only where the blast radius
-        # justifies a false positive stopping the line; elsewhere it still runs
-        # and still comments, but cannot fail the gate. See HIGH_RISK_PATH_RE.
-        "blocking_scope": "high_risk_paths",
+        # The cross-family second opinion now blocks on a CRITICAL finding
+        # anywhere in the diff, same as Claude (see PROVIDERS["anthropic"]
+        # above). Was "high_risk_paths" (PR #48) to bound gpt-4o's false-positive
+        # rate; reversed after infra-commons/meta#630 showed the path-based
+        # narrowing misses real findings whose paths don't contain a risk word
+        # (git-credential-helper token exfiltration path — see the PR body).
+        "blocking_scope": "always",
     },
 }
 
