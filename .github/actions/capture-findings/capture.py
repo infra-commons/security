@@ -549,13 +549,16 @@ def _location_key(title: str) -> str | None:
     return m.group(1) if m else None
 
 
-def create_issue(token: str, repo: str, title: str, body: str, labels: list[str]) -> None:
+def create_issue(token: str, repo: str, title: str, body: str, labels: list[str]) -> dict:
+    """Create the issue and return its JSON (needed for `node_id` — see `add_to_board`)."""
     with httpx.Client(timeout=_TIMEOUT) as client:
-        client.post(
+        resp = client.post(
             f"{GITHUB_API}/repos/{repo}/issues",
             headers=_headers(token),
             json={"title": title, "body": body[:65_000], "labels": labels},
-        ).raise_for_status()
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def update_issue_body(token: str, repo: str, number: int, body: str) -> None:
@@ -565,6 +568,145 @@ def update_issue_body(token: str, repo: str, number: int, body: str) -> None:
             headers=_headers(token),
             json={"body": body[:65_000]},
         ).raise_for_status()
+
+
+# ── Board intake (Projects v2) ──────────────────────────────────────────────────
+#
+# A newly-filed HIGH finding lands on the repo's issue list only — never on the org's GitHub
+# Project board — so it's invisible to the console's Inbox→Doing drain (infra-commons/meta#661).
+# `github.token` (this whole module's REST credential above) cannot fix that: org-level Projects
+# v2 mutations need an App installation token carrying `organization_projects`, which no
+# `permissions:` block can grant to the default Actions token. The caller (reusable workflow)
+# mints one separately via `actions/create-github-app-token` and hands it to this module only as
+# `BOARD_APP_TOKEN` — a distinct, narrower-scoped credential from `token` above, used for nothing
+# but this section.
+#
+# Every function below returns/degrades rather than raises: a board-add is a nice-to-have on top
+# of a successful capture, never a precondition for one. Absent/wrong-shaped input, a missing
+# field, a GraphQL error — all are just a reason string a caller logs and moves on from.
+
+# Only HIGH gets a board-add attempt. CRITICAL already blocks the merge via the PR-time gate (a
+# board card adds little on top of that); MEDIUM/LOW roll into the rolling digest, not individual
+# issues, so there's no single issue to add. This is a scoping call the operator can override —
+# see infra-commons/meta#661.
+BOARD_ADD_SEVERITIES = {"HIGH"}
+
+# Mirrors sharedinfra's scripts/projects_topology.py (the control-plane's own copy of the same
+# fact) — kept in sync by hand. Five entries, changes rarely; not worth a cross-repo fetch for.
+OWNER_PROJECT_NUMBER: dict[str, int] = {
+    "infra-commons": 1,
+    "rolliq-com": 5,
+    "cashbucket-com": 1,
+    "klsjapan-com": 1,
+    "chargingblindly-com": 1,
+}
+
+_GRAPHQL_URL = "https://api.github.com/graphql"
+
+_BOARD_FIELDS_Q = """
+query($owner: String!, $number: Int!) {
+  repositoryOwner(login: $owner) {
+    ... on ProjectV2Owner {
+      projectV2(number: $number) {
+        id
+        closed
+        fields(first: 50) {
+          nodes {
+            __typename
+            ... on ProjectV2SingleSelectField { id name options { id name } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_ADD_ITEM_M = """
+mutation($project: ID!, $content: ID!) {
+  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+}
+"""
+
+_SET_STATUS_M = """
+mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field,
+    value: { singleSelectOptionId: $option }
+  }) { projectV2Item { id } }
+}
+"""
+
+
+def _board_graphql(token: str, query: str, variables: dict) -> dict | None:
+    """POST one GraphQL query/mutation; return `data`, or None on any failure (logged, never raised)."""
+    try:
+        with httpx.Client(timeout=_TIMEOUT) as client:
+            resp = client.post(
+                _GRAPHQL_URL,
+                headers=_headers(token) | {"Content-Type": "application/json"},
+                json={"query": query, "variables": variables},
+            )
+        payload = resp.json()
+    except Exception as exc:
+        print(f"  board: graphql request failed: {exc}", file=sys.stderr)
+        return None
+    if resp.status_code != 200 or payload.get("errors"):
+        detail = payload.get("errors") or f"HTTP {resp.status_code}"
+        print(f"  board: graphql error: {str(detail)[:300]}", file=sys.stderr)
+        return None
+    return payload.get("data")
+
+
+def add_to_board(token: str, owner: str, issue_node_id: str) -> tuple[bool, str]:
+    """Add `issue_node_id` to `owner`'s org Project and set Status = Inbox.
+
+    Returns (ok, message) — `message` is a human-readable reason on failure, or a short success
+    note. Never raises: every failure path here is something a caller logs and continues past.
+    """
+    number = OWNER_PROJECT_NUMBER.get(owner)
+    if number is None:
+        return False, f"owner {owner!r} not in the board topology table"
+
+    data = _board_graphql(token, _BOARD_FIELDS_Q, {"owner": owner, "number": number})
+    proj = ((data or {}).get("repositoryOwner") or {}).get("projectV2")
+    if not proj:
+        return False, f"could not read project #{number} field map for {owner!r}"
+    if proj.get("closed"):
+        return False, f"project #{number} for {owner!r} is closed"
+
+    status_field = next(
+        (n for n in proj["fields"]["nodes"] if n and n.get("name") == "Status"), None
+    )
+    if not status_field:
+        return False, f"no Status field on {owner!r}'s project"
+    inbox_option = next(
+        (o["id"] for o in status_field.get("options", []) if o["name"] == "Inbox"), None
+    )
+    if inbox_option is None:
+        return False, f"no Inbox option on {owner!r}'s Status field"
+
+    project_id = proj["id"]
+    add_data = _board_graphql(
+        token, _ADD_ITEM_M, {"project": project_id, "content": issue_node_id}
+    )
+    item = (add_data or {}).get("addProjectV2ItemById", {}).get("item")
+    if not item:
+        return False, "addProjectV2ItemById failed"
+
+    set_data = _board_graphql(
+        token,
+        _SET_STATUS_M,
+        {
+            "project": project_id,
+            "item": item["id"],
+            "field": status_field["id"],
+            "option": inbox_option,
+        },
+    )
+    if set_data is None:
+        return False, "added to board but failed to set Status = Inbox"
+    return True, "added to board Inbox"
 
 
 def issue_title(finding: dict) -> str:
@@ -733,6 +875,8 @@ def main() -> None:
     after = os.environ.get("AFTER_SHA", "")
     run_url = os.environ.get("RUN_URL", "")
     individual_floor = individual_severities(os.environ.get("INDIVIDUAL_SEVERITY_FLOOR", ""))
+    board_token = os.environ.get("BOARD_APP_TOKEN", "")
+    board_owner = repo.split("/", 1)[0] if repo else ""
 
     missing = [k for k, v in {
         "REVIEW_API_KEY": api_key, "GITHUB_TOKEN": token,
@@ -826,10 +970,22 @@ def main() -> None:
         labels = ["security", f"severity:{sev.lower()}", "source:adversarial-ai"]
         body = issue_body(finding, after, repo, run_url)
         print(f"  Creating [{sev}] {title[:80]}")
-        create_issue(token, repo, title, body, labels)
+        created_issue = create_issue(token, repo, title, body, labels)
         created += 1
         if sev == "CRITICAL":
             criticals_new += 1
+        if sev in BOARD_ADD_SEVERITIES:
+            if not board_token:
+                print("  board: skipped — no BOARD_APP_TOKEN (org not yet provisioned)")
+            else:
+                try:
+                    node_id = created_issue.get("node_id", "")
+                    ok, msg = add_to_board(board_token, board_owner, node_id) if node_id else (
+                        False, "created issue response had no node_id"
+                    )
+                except Exception as exc:  # noqa: BLE001 — a board-add bug must never sink capture
+                    ok, msg = False, f"unexpected error: {exc}"
+                print(f"  {'✓' if ok else 'board: skipped —'} {msg}")
         time.sleep(1)
 
     digest_issues, digest_rows = upsert_digest(

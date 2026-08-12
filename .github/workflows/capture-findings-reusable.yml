@@ -25,6 +25,9 @@ name: Capture security findings (reusable)
 #         severity_floor: HIGH   # optional; empty/omitted defaults to HIGH (historical)
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         # Optional (infra-commons/meta#661) — omit entirely until this org has provisioned the
+#         # secret; a newly-filed HIGH just won't be board-added, nothing else changes:
+#         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
 #
 # The caller workflow must grant:
 #   permissions:
@@ -48,6 +51,12 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
+      INFRA_COMMONS_BOT_PRIVATE_KEY:
+        description: >-
+          Optional. The infra-commons-bot App's private key, forwarded by the caller so a newly
+          filed HIGH finding can be added to the org's board Inbox (infra-commons/meta#661). Not
+          required — omitted or empty, board-add is skipped and everything else is unaffected.
+        required: false
 
 jobs:
   capture:
@@ -59,6 +68,32 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Board-add token (infra-commons/meta#661) — mints an App installation token carrying
+      # `organization_projects: write`, the one permission `github.token` above can never hold no
+      # matter what this job's `permissions:` block says (org-level Projects v2 is outside the
+      # default Actions token's grantable scopes entirely). Both guards below keep this strictly
+      # additive to the job that already runs today:
+      #   - `if:` — the caller's org hasn't provisioned the secret yet ⇒ step is skipped outright,
+      #     `steps.board-token.outputs.token` reads empty, capture.py sees no BOARD_APP_TOKEN and
+      #     just doesn't attempt a board-add. This is every caller's state right now.
+      #   - `continue-on-error: true` — secret present but minting fails for any reason (App not
+      #     installed in this org, wrong owner, revoked key) ⇒ the step reports failed but the JOB
+      #     does not, so the findings capture below still runs to completion.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: board-token
+        if: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY != '' }}
+        continue-on-error: true
+        with:
+          # infra-commons-bot's client ID — a public identifier, not a credential; the private key
+          # below is the secret. Same App, same constant used in infra-commons/meta's
+          # expand-inbox.yml. Gitleaks' entropy rule can't tell a public App id from a secret, so
+          # this line is allowed explicitly rather than widening the rule for the whole repo.
+          client-id: Iv23liH9thgSIViTxbMV # gitleaks:allow
+          private-key: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-organization-projects: write
 
       # Pinned to the capture-findings/v1 moving tag, not a raw SHA: a capture.py fix
       # ships by moving this tag (see README) — no reusable/consumer edit needed, which
@@ -72,3 +107,4 @@ jobs:
           after-sha: ${{ github.event.after }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           severity-floor: ${{ inputs.severity_floor }}
+          board-app-token: ${{ steps.board-token.outputs.token }}
