@@ -31,6 +31,15 @@ inputs:
       digest — the historical behaviour).
     required: false
     default: ""
+  board-app-token:
+    description: >-
+      App installation token carrying `organization_projects: write`, used only to add a newly
+      filed HIGH finding to the org's GitHub Project Inbox (infra-commons/meta#661). Empty by
+      default — a newly-filed HIGH just isn't board-added, nothing else changes. `github-token`
+      above cannot do this itself: org-level Projects v2 mutations need an App/PAT token, which no
+      `permissions:` block can grant to a default Actions token.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -58,4 +67,5 @@ runs:
         AFTER_SHA: ${{ inputs.after-sha }}
         RUN_URL: ${{ inputs.run-url }}
         INDIVIDUAL_SEVERITY_FLOOR: ${{ inputs.severity-floor }}
+        BOARD_APP_TOKEN: ${{ inputs.board-app-token }}
       run: python "$GITHUB_ACTION_PATH/capture.py"
