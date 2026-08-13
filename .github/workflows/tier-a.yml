@@ -100,11 +100,15 @@ jobs:
       - name: Semgrep scan
         run: |
           pip install semgrep==1.163.0
-          CONFIG_FLAGS=""
+          # Array, not a joined string (shellcheck SC2086) — each --config/value
+          # pair is its own element, so an empty CONFIG_FLAGS expands to zero
+          # arguments and a populated one expands to exactly the same argv the
+          # old unquoted `$CONFIG_FLAGS` produced, without relying on word-split.
+          CONFIG_FLAGS=()
           for cfg in ${{ inputs.semgrep_config }}; do
-            CONFIG_FLAGS="$CONFIG_FLAGS --config $cfg"
+            CONFIG_FLAGS+=(--config "$cfg")
           done
-          semgrep scan $CONFIG_FLAGS --text --error
+          semgrep scan "${CONFIG_FLAGS[@]}" --text --error
 
   # ── Adversarial AI review (PR only) ──────────────────────────────────────────
   # Calls the reusable from this security repo. Make `adversarial-review / gate`

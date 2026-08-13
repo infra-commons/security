@@ -66,6 +66,15 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      # infra-commons/security#90 — `secrets` is not a context a step `if:` may read (GitHub's
+      # context-availability table has no `secrets` row for `jobs.<job_id>.steps[*].if`, and none
+      # for `jobs.<job_id>.if` either — job-level `if:` isn't a legal shortcut here). `jobs.<job_id>.env`
+      # IS one of the places `secrets` may be read, and a step's `if:` CAN read `env`, so the
+      # secret's presence has to be mapped here and tested as a plain env var below. A step
+      # cannot read its own `env:` block from its own `if:` — this has to sit at job level so it
+      # exists before the first step's `if:` is evaluated.
+      BOARD_APP_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -82,7 +91,7 @@ jobs:
       #     does not, so the findings capture below still runs to completion.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: board-token
-        if: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY != '' }}
+        if: ${{ env.BOARD_APP_KEY != '' }}
         continue-on-error: true
         with:
           # infra-commons-bot's client ID — a public identifier, not a credential; the private key
