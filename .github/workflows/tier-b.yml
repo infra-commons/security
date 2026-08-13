@@ -82,14 +82,18 @@ jobs:
       - name: Semgrep scan
         run: |
           pip install semgrep==1.163.0
-          # Build --config flags from space-separated input
-          CONFIG_FLAGS=""
+          # Build --config flags from space-separated input. Array, not a joined
+          # string (shellcheck SC2086) — each --config/value pair is its own
+          # element, so an empty CONFIG_FLAGS expands to zero arguments and a
+          # populated one expands to exactly the same argv the old unquoted
+          # `$CONFIG_FLAGS` produced, without relying on word-splitting.
+          CONFIG_FLAGS=()
           for cfg in ${{ inputs.semgrep_config }}; do
-            CONFIG_FLAGS="$CONFIG_FLAGS --config $cfg"
+            CONFIG_FLAGS+=(--config "$cfg")
           done
           # Non-zero exit on findings is acceptable here — we report, not block.
           # Promote to exit-code 1 when the repo's baseline is clean.
-          semgrep scan $CONFIG_FLAGS --text || true
+          semgrep scan "${CONFIG_FLAGS[@]}" --text || true
 
   # ── Dependency CVE scan (schedule + manual only) ─────────────────────────────
   trivy:

@@ -1,0 +1,51 @@
+name: Workflow lint
+
+# Statically validates every workflow YAML in this repo with actionlint — including GitHub's
+# context-availability rules (which contexts an expression may read at each YAML location:
+# `if:`, `env:`, `with:`, ...).
+#
+# infra-commons/security#90: `capture-findings-reusable.yml` shipped a step-level
+# `if: ${{ secrets.X != '' }}` — `secrets` is not an available context there — and was released
+# at `capture-findings/v1` with no run ever having validated it, because nothing in this repo
+# calls its own reusable workflows. `release_composites.py`'s staleness check and its verifier
+# (infra-commons/security#63, already fixed) compare the reusable's CONTENT against the tag, not
+# its VALIDITY — a syntactically-broken reusable releases exactly as cleanly as a working one by
+# that measure. This is the check that closes the remaining gap: actionlint parses and validates
+# every workflow file on every PR, before anything can reach a moving tag.
+#
+# Bare invocation (no explicit file glob) is deliberate: actionlint's default project-mode
+# discovery finds `.github/workflows/*.yml` correctly and does not misinterpret the composite
+# `action.yml` manifests under `.github/actions/*/` as workflow files (passing them explicitly
+# produces false "on/jobs section missing" noise — actionlint expects those in their own,
+# different schema).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: All workflows pass actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install actionlint (checksum-pinned)
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          curl -sSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+
+      - name: Run actionlint
+        run: ./actionlint
