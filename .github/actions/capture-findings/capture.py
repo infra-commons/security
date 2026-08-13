@@ -371,14 +371,31 @@ def build_suppression_context(suppressions: list[dict]) -> str:
 
 
 def is_suppressed(finding: dict, suppressions: list[dict]) -> tuple[bool, str | None]:
+    """Return (True, id) if any suppression matches, else (False, None).
+
+    `file_pattern`/`finding_pattern` are always required and always matched against the
+    reviewer's prose (`location`, `title + description`) — see infra-commons/meta#678 for why
+    that alone is fragile: a reworded finding can drift outside a proximity-window regex with
+    nothing to say so.
+
+    `category_pattern` is an OPTIONAL third, structural pre-filter, matched against the
+    reviewer's own `category` classification (stable across rewording — see #678) rather than
+    free text. It only NARROWS a match: an entry that omits it behaves exactly as before, and an
+    entry that sets it can never suppress a finding the file/finding patterns wouldn't already
+    have caught. Mirrors `pentest/triage.py`'s existing `category_pattern` field/semantics.
+    """
     location = finding.get("location", "")
     text = f"{finding.get('title', '')} {finding.get('description', '')}"
+    category = str(finding.get("category", ""))
     for sup in suppressions:
         file_pat = sup.get("file_pattern", "")
         find_pat = sup.get("finding_pattern", "")
         if not file_pat or not find_pat:
             continue
         try:
+            cat_pat = sup.get("category_pattern", "")
+            if cat_pat and not re.search(cat_pat, category, re.IGNORECASE):
+                continue
             if (re.search(file_pat, location, re.IGNORECASE)
                     and re.search(find_pat, text, re.IGNORECASE)):
                 return True, sup.get("id")

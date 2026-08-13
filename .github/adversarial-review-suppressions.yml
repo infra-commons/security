@@ -7,12 +7,27 @@
 # private repo's own .github/adversarial-review-suppressions.yml.
 #
 # Format:
-#   - id: kebab-slug            # unique; canonical ids win over same-id repo-local entries
-#     file_pattern: "regex"     # matched against the finding's `location` (case-insensitive)
-#     finding_pattern: "regex"  # matched against title + description (case-insensitive)
-#     reason: >                 # why this is a false positive for this architecture
+#   - id: kebab-slug              # unique; canonical ids win over same-id repo-local entries
+#     file_pattern: "regex"       # matched against the finding's `location` (case-insensitive)
+#     finding_pattern: "regex"    # matched against title + description (case-insensitive)
+#     category_pattern: "regex"   # OPTIONAL, capture-findings path only — see below
+#     reason: >                   # why this is a false positive for this architecture
 #       Explanation.
-#     expires: YYYY-MM-DD       # omit for permanent architectural decisions
+#     expires: YYYY-MM-DD         # omit for permanent architectural decisions
+#
+# `category_pattern` (infra-commons/meta#678): an OPTIONAL structural pre-filter, matched
+# against the reviewer's own `category` classification (injection|auth|secrets|llm|
+# data-handling|dependency|infra|architecture) instead of free text. It only NARROWS a match —
+# omitting it (every entry below does) is byte-identical to today's behaviour. Its value is that
+# category is measurably more stable across reviewer rewording than prose is: meta#197 and its
+# recurrence meta#611, worded completely differently months apart, were both classified
+# `dependency`. That lets a NEW entry pair a loose, single-word `finding_pattern` with a
+# `category_pattern` constraint instead of chasing an ever-wider proximity window every time the
+# reviewer rewords the same finding (the failure meta#678 documents). It is NOT retrofitted onto
+# any entry below — each is its own call for whoever owns it. Scope: this field is read only by
+# `capture.py::is_suppressed()` (the post-merge capture-findings path). The PR-time
+# adversarial-review gate (`adversarial-review.py::apply_suppressions()`) matches over
+# unstructured Markdown with no `category` to anchor on, and ignores this key if present.
 #
 # WARNING: `file_pattern` is matched against `location`, NOT against a bare path. capture.py's
 # reviewer prompt specifies `"location": "path/to/file:line_number"`, so a real finding's

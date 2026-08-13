@@ -116,6 +116,14 @@ def test_patterns_compile(entry):
                 f"{entry.get('id')}: {key} does not compile ({exc}) — capture.py would skip "
                 f"this entry silently"
             )
+    if entry.get("category_pattern"):
+        try:
+            re.compile(entry["category_pattern"])
+        except re.error as exc:
+            pytest.fail(
+                f"{entry.get('id')}: category_pattern does not compile ({exc}) — capture.py "
+                f"would skip this entry silently"
+            )
 
 
 @pytest.mark.parametrize("entry", ENTRIES, ids=IDS)
@@ -266,3 +274,114 @@ NOT_SUPPRESSED = [
 def test_findings_outside_the_class_are_not_suppressed(why, finding):
     hit, sup_id = capture.is_suppressed(finding, ENTRIES)
     assert not hit, f"{why!r} was wrongly suppressed by {sup_id!r}"
+
+
+# ── category_pattern as a structural anchor (infra-commons/meta#678) ─────────────────────────
+# #197's suppression required `(wildcard|patterns_allowed)` within an 80-char window of a
+# qualifying phrase; its recurrence #611 — same underlying finding, reworded — put the nearest
+# qualifying phrase ~180 chars away and was filed live instead of suppressed. #679 fixed that one
+# entry by widening its window. These three cases test the general lever instead: `category` is
+# stable across the same rewording (#197 and #611 were both classified `dependency`), so it can
+# anchor a suppression that doesn't need a proximity window at all.
+#
+# Text is #611's real, verbatim, sanitized title+description — the same constants recorded in
+# infra-commons/meta's tests/test_suppression_patterns.py (META_611_TITLE/META_611_DESC) — not a
+# paraphrase. The "@" characters render as fullwidth "＠": capture.py's sanitize() replaces "@"
+# before is_suppressed() ever sees the text (parse_findings order), so a real finding never
+# carries a literal "@" by the time it reaches the matcher.
+
+META_611_TITLE = (
+    "Wildcard version pin on third-party org action allows any future tag/SHA to run in CI"
+)
+META_611_DESC = (
+    "The pattern 'rolliq-com/platform-iac＠*' permits any tag, branch, or commit SHA from that "
+    "repository to execute in CI workflows. If rolliq-com/platform-iac is compromised, has a "
+    "supply-chain incident, or if a malicious collaborator pushes a new tag, the wildcard means "
+    "the malicious code will automatically be trusted and executed in pipeline runs—including "
+    "deployments to Azure environments. The risk is amplified because (1) this action runs at "
+    "build time inside azure-deploy-reusable.yml which has Azure credentials in scope, and (2) "
+    "the wildcard bypasses the otherwise SHA-pinning discipline expected of a financial-document "
+    "SaaS CI/CD pipeline. A SHA pin or at minimum a tag-locked pattern (e.g. ＠v1) would bound "
+    "the exposure."
+)
+META_611_FINDING = {
+    "location": "devops-manifest.yaml:479",
+    "title": META_611_TITLE,
+    "description": META_611_DESC,
+    "category": "dependency",
+}
+
+# The exact pre-#679 pattern (infra-commons/meta commit 455c827, entry
+# org-actions-policy-wildcard-is-a-repo-allowlist-not-a-version-pin) — a synthetic, standalone
+# entry here, not read from either live suppressions file.
+PRE_679_PATTERN = (
+    r"(wildcard|patterns_allowed).{0,80}"
+    r"(no version pinning|any version|malicious.{0,20}(version|tag|release))"
+)
+
+
+def test_pre_679_window_pattern_missed_the_real_611_recurrence():
+    """Reproduces the measured defect against the real matcher, not a description of it."""
+    entry = {
+        "id": "pre-679-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "finding_pattern": PRE_679_PATTERN,
+    }
+    hit, sup_id = capture.is_suppressed(META_611_FINDING, [entry])
+    assert not hit, (
+        f"expected the pre-#679 window pattern to miss #611's real text (that's the recorded "
+        f"defect); it matched via {sup_id!r} instead — the reproduction is wrong"
+    )
+
+
+def test_category_pattern_catches_the_recurrence_with_no_proximity_window():
+    """A loose, single-word finding_pattern, safe only because category_pattern anchors it."""
+    entry = {
+        "id": "category-anchored-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "category_pattern": "dependency",
+        "finding_pattern": "wildcard",
+    }
+    hit, sup_id = capture.is_suppressed(META_611_FINDING, [entry])
+    assert hit and sup_id == "category-anchored-synthetic"
+
+
+def test_category_pattern_foil_a_different_class_sharing_file_and_trigger_word():
+    """Must NOT be caught — the too-broad direction of error.
+
+    Same file, same trigger word ("wildcard"), but a genuinely different, must-surface finding:
+    a hardcoded private-key path for a *.rolliq.com WILDCARD TLS certificate, classified
+    `secrets`. A bare `finding_pattern: "wildcard"` is only safe to write because
+    `category_pattern` excludes this — proving the anchor actually discriminates, not just that
+    it's present.
+    """
+    foil = {
+        "location": "devops-manifest.yaml:88",
+        "title": "Wildcard-scoped TLS certificate private key path committed in devops-manifest.yaml",
+        "description": "A private key file path for the *.rolliq.com wildcard TLS certificate is "
+        "hardcoded in devops-manifest.yaml's `deploy.tls_key_path` field, exposing the "
+        "certificate's on-disk location to anyone with read access to this repository.",
+        "category": "secrets",
+    }
+    entry = {
+        "id": "category-anchored-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "category_pattern": "dependency",
+        "finding_pattern": "wildcard",
+    }
+    hit, sup_id = capture.is_suppressed(foil, [entry])
+    assert not hit, f"foil (category=secrets) was wrongly suppressed by {sup_id!r}"
+
+
+def test_category_pattern_is_a_no_op_for_every_live_entry():
+    """The too-narrow direction: no entry in the canonical file sets category_pattern today.
+
+    So the new pre-filter can only ever be inert for the file as it stands — this is the
+    regression proof that adding the field didn't change any existing entry's behaviour. If this
+    ever fails, some entry started using category_pattern and belongs under its own targeted test
+    instead of relying on this blanket absence check.
+    """
+    assert not any(e.get("category_pattern") for e in ENTRIES), (
+        "an entry now sets category_pattern — add a dedicated test for it and update/drop this "
+        "one rather than deleting the coverage"
+    )
