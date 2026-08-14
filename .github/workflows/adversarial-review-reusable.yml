@@ -142,15 +142,37 @@ jobs:
       # This step only READS. It must not fail the job: an inability to look up
       # the marker is not a reason to block a merge, and `|| true` plus the
       # empty default means an error here degrades to today's fail-open
-      # behaviour rather than to a repo-wide freeze.
+      # behaviour rather than to a repo-wide freeze. That is a DELIBERATE,
+      # unchanged choice, not an oversight: fail-closed on an unreadable marker
+      # would block every PR fleet-wide on a transient `gh` API blip, which is
+      # worse than the exposure it would close. It does leave a narrower version
+      # of the same fail-open this step's label requirement (below) closes on
+      # the write side — anyone who can make THIS search error out (not just
+      # anyone who can open an issue) gets the same "reads as not open" result a
+      # title squat used to give them for free. That residual is accepted
+      # because causing a `gh search` call to fail is far harder than opening an
+      # issue with a chosen title, and because it is now bounded by the write
+      # side requiring the label — a squatted title alone no longer suppresses
+      # the real marker's creation, only a genuine read failure does.
+      #
+      # infra-commons/security#81: matches "Record that the provider quota is
+      # exhausted" below on identification, requiring the SAME label this job's
+      # own token applies, not just the title. See that step's comment for the
+      # full exploit this closes; this half of the fix is what makes the fix
+      # visible on the read side — a write-side label with no matching read-side
+      # requirement would still let a title-only squat force a false
+      # "open=false" on the very next PR by simply not matching the labelled
+      # issue the write step actually created.
       - name: Look up the quota tracking issue
         id: quota_marker
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
+          LABEL="security:quota-exhausted"
           TITLE="[security] Adversarial review: provider quota exhausted"
-          COUNT=$(gh issue list --repo "$REPO" --search "\"${TITLE}\" in:title" \
+          COUNT=$(gh issue list --repo "$REPO" \
+                    --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
                     --state open --json number --jq 'length' 2>/dev/null || echo "")
           if [ "${COUNT:-0}" -gt 0 ] 2>/dev/null; then
             echo "open=true" >> "$GITHUB_OUTPUT"
@@ -181,7 +203,34 @@ jobs:
       # Opened on the FIRST quota-exhausted PR, which is the one the gate lets
       # through. Its existence is what blocks the second, so this must run even
       # when the gate step failed — `always()` is load-bearing here, not
-      # decoration. Deduplicated by title, so a repeat does not pile up issues.
+      # decoration.
+      #
+      # infra-commons/security#81, matching #80's fix on the degraded-pass and
+      # critical-findings issues: deduplicated on a LABEL this step applies
+      # itself, not on title text alone. A title is plain text — opening an
+      # issue needs no special privilege — so before this fix, an attacker with
+      # only issue-create access could pre-file this exact title, any time. The
+      # real exhaustion's dedupe (title-only) would then find the squatted
+      # issue and skip creating the real marker; the attacker closes theirs;
+      # the *next* PR's "Look up the quota tracking issue" step (also fixed by
+      # #81) reads nothing open and fails open again — silently defeating "fail
+      # open once, then block," which is the entire point of this mechanism
+      # (see this file's header comment on why a budget, unlike a rate limit,
+      # must not be left on the fail-open path indefinitely).
+      #
+      # Unlike #80's degraded-pass step, there is no external, title-only
+      # reader of THIS issue to stay backward-compatible with — the only reader
+      # is the lookup step above, in this same job, which this fix also gates
+      # on the label. So there is deliberately NO fallback that creates an
+      # unlabelled issue if the labelled create fails (contrast the sibling
+      # steps below, which do have one for a real compatibility reason). An
+      # unlabelled fallback here would satisfy nothing: the next run's
+      # label-gated lookup could never find it, silently reverting the whole
+      # mechanism to indefinite fail-open — the exact failure this fix closes.
+      # Letting `gh issue create` fail the step (and therefore this required
+      # check) on that path is the correct, safe-direction behaviour instead:
+      # worst case one PR is blocked by a `gh` API failure, not every
+      # subsequent PR merged unreviewed for the rest of the billing period.
       - name: Record that the provider quota is exhausted
         if: ${{ always() && steps.evaluate.outputs.quota_exhausted == 'true' && github.event_name == 'pull_request' }}
         env:
@@ -191,9 +240,20 @@ jobs:
           REPO: ${{ github.repository }}
           UNAVAILABLE: ${{ steps.evaluate.outputs.unavailable }}
         run: |
+          LABEL="security:quota-exhausted"
           TITLE="[security] Adversarial review: provider quota exhausted"
-          EXISTING=$(gh issue list --repo "$REPO" --search "\"${TITLE}\" in:title" \
-                       --state open --json number --jq 'length')
+
+          # Best-effort and idempotent (--force updates rather than errors on a
+          # label that already exists). Its failure must not stop the create
+          # below from being attempted — a repo that already has this label
+          # (e.g. from a prior run) must not depend on this call succeeding.
+          gh label create "$LABEL" --color D93F0B \
+            --description "Applied only by the adversarial-review gate's own token. Both the dedupe below and the next run's lookup depend on an issue's author being unable to attach this themselves." \
+            --force >/dev/null 2>&1 || true
+
+          EXISTING=$(gh issue list --repo "$REPO" \
+            --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
+            --state open --json number --jq 'length')
           if [ "${EXISTING}" -gt "0" ]; then
             echo "Quota tracking issue already open — leaving it as the block signal."
             exit 0
@@ -204,7 +264,7 @@ jobs:
             "Unlike a rate limit, this does not clear by itself. **While this issue is open, further PRs will be BLOCKED** rather than merged unreviewed — that is deliberate: the first change is not held up, the tenth is not shipped unreviewed." \
             "**To restore review:** top up the provider account or raise its spend cap, confirm a review runs, then close this issue. Closing it re-arms the one-time pass." \
             "_Created automatically by the \`adversarial-review / gate\` workflow._")
-          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY"
+          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY" --label "$LABEL"
 
       # A degraded pass renders in the checks UI exactly like a full pass, so
       # without a durable record nobody learns that a merge happened on fewer
