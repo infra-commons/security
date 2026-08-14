@@ -141,6 +141,7 @@ def _step_run(name: str) -> str:
 @pytest.mark.parametrize("step_name, label", [
     ("Record a degraded pass", "security:degraded-pass"),
     ("Create tracking issue for critical findings", "security:critical-findings"),
+    ("Record that the provider quota is exhausted", "security:quota-exhausted"),
 ])
 def test_the_issue_filing_steps_dedupe_on_a_label_the_step_itself_applies(step_name, label):
     run = _step_run(step_name)
@@ -169,3 +170,64 @@ def test_the_degraded_pass_title_still_matches_the_downstream_consumer_contract(
     # the change belongs in a coordinated PR against sharedinfra, not here.
     run = _step_run("Record a degraded pass")
     assert 'TITLE="[security] Adversarial review passed degraded on PR #${PR_NUMBER}"' in run
+
+
+# infra-commons/security#81 — the quota marker has the same title-squat exposure
+# #80 fixed above, but with one difference: nothing outside this workflow reads it.
+# The "Look up the quota tracking issue" step reads back what "Record that the
+# provider quota is exhausted" wrote, on the *next* PR, to decide fail-open-once
+# vs. block. A squatted, then closed, title-only issue makes the write step skip
+# creating the real marker and the read step then sees nothing open — silently
+# defeating the one thing this mechanism exists to guarantee (see #81 for the
+# full walkthrough). Both sides must require the same label, or the fix on one
+# side is invisible to the other.
+def test_the_quota_lookup_also_requires_the_label_not_just_the_title():
+    run = _step_run("Look up the quota tracking issue")
+    assert 'label:\\"${LABEL}\\"' in run, (
+        "the lookup step matches on title text alone — a squatted-then-closed "
+        "title-only issue would make this read 'open=false' even the run right "
+        "after a real exhaustion recorded a properly labelled marker"
+    )
+
+
+def test_the_quota_lookup_and_recorder_agree_on_the_label():
+    lookup = _step_run("Look up the quota tracking issue")
+    record = _step_run("Record that the provider quota is exhausted")
+    lookup_label = re.search(r'LABEL="([^"]+)"', lookup)
+    record_label = re.search(r'LABEL="([^"]+)"', record)
+    assert lookup_label and record_label, "both steps must assign a LABEL"
+    assert lookup_label.group(1) == record_label.group(1), (
+        "the read and write sides disagree on the label — a marker written "
+        "under one label is invisible to a lookup gated on the other, which "
+        "is a silent, permanent fail-open, not a loud one"
+    )
+
+
+def test_the_quota_marker_title_is_identical_on_both_sides():
+    lookup = _step_run("Look up the quota tracking issue")
+    record = _step_run("Record that the provider quota is exhausted")
+    title_re = re.search(r'TITLE="([^"]+)"', lookup)
+    assert title_re and title_re.group(1) in record, (
+        "the lookup and recorder titles have drifted apart — the lookup would "
+        "never find what the recorder writes"
+    )
+
+
+def test_the_quota_recorder_has_no_unlabeled_fallback():
+    # Unlike "Record a degraded pass", there is no external, title-only reader of
+    # the quota marker to stay backward-compatible with — the only reader is the
+    # lookup step above, in this same job, which this fix also gates on the label.
+    # A "create without the label if the labelled create fails" fallback here
+    # would not preserve compatibility with anything; it would create a durable
+    # record the next run's lookup can never find, silently reverting to
+    # indefinite fail-open — the exact failure this fix closes. A hard failure
+    # of this step (and therefore the job/required check) on that path is the
+    # correct, safe-direction behaviour instead, and matches how the sibling
+    # "Create tracking issue for critical findings" step already behaves when
+    # its own issue-create fails outright.
+    run = _step_run("Record that the provider quota is exhausted")
+    assert run.count("gh issue create") == 1, (
+        "an unlabeled fallback `gh issue create` call would be reachable via "
+        "the next run's label-gated lookup only by luck, not by design — see "
+        "this test's comment for why that's the wrong failure mode here"
+    )
