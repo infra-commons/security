@@ -102,7 +102,14 @@ jobs:
           private-key: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          # `create-github-app-token` replaces the App install's full grant with exactly the
+          # `permission-*` inputs given here rather than narrowing it additively — so without this,
+          # the minted token holds `organization_projects` and nothing else. `addProjectV2ItemById`
+          # below needs to resolve its `contentId` (the issue this same job just created) as an
+          # Issue node, which requires read access to it; omitting this silently no-ops the board-add
+          # as an indistinguishable `NOT_FOUND` (infra-commons/meta#661).
           permission-organization-projects: write
+          permission-issues: read
 
       # Pinned to the capture-findings/v1 moving tag, not a raw SHA: a capture.py fix
       # ships by moving this tag (see README) — no reusable/consumer edit needed, which
