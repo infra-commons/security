@@ -21,6 +21,7 @@ Covers the three defects in rolliq-com/solution-recruitment-reference-check#888:
      runner provisioning rather than the failure
 """
 import importlib.util
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -523,6 +524,191 @@ def test_the_autofix_prompt_carries_the_failure_region(prompt_recorder, tmp_path
 
     assert len(prompt_recorder) == 1
     assert "needs to be imported into the State" in prompt_recorder[0]
+
+
+# ── triage_dependabot_prs: reads paths + check conclusions before merging ──────
+#
+# infra-commons/security#86: the eligibility test was a regex over the PR
+# TITLE only, so a red advisory check (rolliq-com/solution-template#597,
+# `Dockerfile digest invariant` FAILING) reached main, and a workflow-file
+# bump (rolliq-com/platform-iac#412) defeated auto-merge-churn's deliberate
+# `.github/workflows/**` exclusion. These are the two failing-against-#86
+# regressions, plus unit coverage of the helpers that fix them.
+
+def _rollup(*conclusions):
+    return [{"conclusion": c} for c in conclusions]
+
+
+# -- _has_failing_check ----------------------------------------------------
+
+@pytest.mark.parametrize(
+    "conclusion", ["FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"])
+def test_has_failing_check_flags_terminal_failures(conclusion):
+    assert hc._has_failing_check(_rollup("SUCCESS", conclusion)) is True
+
+
+@pytest.mark.parametrize("conclusion", ["CANCELLED", "SKIPPED", "SUCCESS", "NEUTRAL"])
+def test_has_failing_check_does_not_flag_routine_states(conclusion):
+    """CANCELLED/SKIPPED are routine here (author-conditional sub-jobs, and
+    auto-merge's own Evaluate job cancelled by its concurrency group) — see
+    infra-commons/meta#624 for the same misreading in a different tool."""
+    assert hc._has_failing_check(_rollup(conclusion)) is False
+
+
+def test_has_failing_check_treats_a_still_running_check_as_not_failing():
+    """A pending check has no conclusion yet. The sweep runs while CI is still
+    going, so refusing on PENDING would make the sweep useless."""
+    assert hc._has_failing_check([{"conclusion": None, "status": "IN_PROGRESS"}]) is False
+
+
+def test_has_failing_check_reads_the_legacy_statusContext_state_field():
+    assert hc._has_failing_check([{"state": "ERROR"}]) is True
+
+
+# -- _touches_workflow_files -------------------------------------------------
+
+def test_touches_workflow_files_true_for_a_workflow_edit():
+    assert hc._touches_workflow_files([{"path": ".github/workflows/ci.yml"}]) is True
+
+
+def test_touches_workflow_files_false_for_an_ordinary_dependency_bump():
+    assert hc._touches_workflow_files([{"path": "requirements.txt"}]) is False
+
+
+# -- _pr_files_and_checks: fail closed on an unreadable result --------------
+
+def test_pr_files_and_checks_returns_None_not_empty_when_gh_yields_nothing(monkeypatch):
+    """A `gh` failure must be distinguishable from "no files, no checks" — an
+    absent result reading as a pass is the #86 failure mode itself."""
+    monkeypatch.setattr(hc, "_gh", lambda *a, **k: "")
+    assert hc._pr_files_and_checks("o/r", 1) is None
+
+
+def test_pr_files_and_checks_returns_None_on_unparseable_json(monkeypatch):
+    monkeypatch.setattr(hc, "_gh", lambda *a, **k: "not json")
+    assert hc._pr_files_and_checks("o/r", 1) is None
+
+
+def test_pr_files_and_checks_parses_a_good_result(monkeypatch):
+    monkeypatch.setattr(
+        hc, "_gh",
+        lambda *a, **k: '{"files": [{"path": "a.txt"}], "statusCheckRollup": []}')
+    data = hc._pr_files_and_checks("o/r", 1)
+    assert data == {"files": [{"path": "a.txt"}], "statusCheckRollup": []}
+
+
+# -- triage_dependabot_prs: call-site wiring ---------------------------------
+
+@pytest.fixture
+def dependabot_harness(monkeypatch):
+    """Drive triage_dependabot_prs against a canned PR list + per-PR gh calls,
+    recording which PRs actually got approved/merged."""
+    state = {"prs": [], "pr_data": {}, "approved": [], "merged": []}
+
+    def fake_gh_json(*args):
+        if args[:2] == ("pr", "list"):
+            return list(state["prs"])
+        return []
+
+    def fake_gh(*args, **kwargs):
+        if args[:2] == ("pr", "view"):
+            number = int(args[2])
+            data = state["pr_data"].get(number, {"files": [], "statusCheckRollup": []})
+            return json.dumps(data)
+        if args[:2] == ("pr", "review"):
+            state["approved"].append(int(args[2]))
+            return ""
+        if args[:2] == ("pr", "merge"):
+            state["merged"].append(int(args[2]))
+            return ""
+        return ""
+
+    monkeypatch.setattr(hc, "_gh_json", fake_gh_json)
+    monkeypatch.setattr(hc, "_gh", fake_gh)
+    monkeypatch.setattr(hc, "_approver_env", lambda: None)
+    return state
+
+
+def test_a_red_advisory_check_is_not_auto_merged(dependabot_harness):
+    """Regression for rolliq-com/solution-template#597: `gh pr merge --auto`
+    only waits on required checks, so a FAILING advisory check (the Dockerfile
+    digest guard) must be caught here, before line 754, not left to GitHub."""
+    dependabot_harness["prs"] = [
+        {"number": 597, "title": "bump python from 3.11.1 to 3.11.2", "url": "u"}]
+    dependabot_harness["pr_data"][597] = {
+        "files": [{"path": "Dockerfile"}],
+        "statusCheckRollup": _rollup("SUCCESS", "FAILURE"),
+    }
+
+    result = hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["approved"] == []
+    assert dependabot_harness["merged"] == []
+    assert result["skipped_failing_checks"] == 1
+
+
+def test_a_workflow_file_bump_is_not_auto_merged(dependabot_harness):
+    """Regression for rolliq-com/platform-iac#412: a `github_actions`-group
+    bump touching `.github/workflows/` must get the same hard exclusion
+    auto-merge-churn applies, not fall through this sibling path."""
+    dependabot_harness["prs"] = [
+        {"number": 412,
+         "title": "bump the github-actions-minor-patch group with 2 updates",
+         "url": "u"}]
+    dependabot_harness["pr_data"][412] = {
+        "files": [{"path": ".github/workflows/ci.yml"}],
+        "statusCheckRollup": _rollup("SUCCESS"),
+    }
+
+    result = hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["approved"] == []
+    assert dependabot_harness["merged"] == []
+    assert result["skipped_workflow_files"] == 1
+
+
+def test_an_unreadable_pr_is_left_alone_not_merged(dependabot_harness, monkeypatch):
+    """An absent/unparseable check-run read must fail CLOSED, not read as a
+    pass — the exact class this repo has a recorded history of."""
+    dependabot_harness["prs"] = [
+        {"number": 5, "title": "bump foo from 1.0.0 to 1.0.1", "url": "u"}]
+    monkeypatch.setattr(hc, "_pr_files_and_checks", lambda repo, number: None)
+
+    result = hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["approved"] == []
+    assert dependabot_harness["merged"] == []
+    assert result["skipped_unreadable"] == 1
+
+
+def test_a_clean_minor_bump_is_still_approved_and_auto_merged(dependabot_harness):
+    """No regression on the happy path: all-green checks, no workflow files."""
+    dependabot_harness["prs"] = [
+        {"number": 10, "title": "bump foo from 1.0.0 to 1.0.1", "url": "u"}]
+    dependabot_harness["pr_data"][10] = {
+        "files": [{"path": "requirements.txt"}],
+        "statusCheckRollup": _rollup("SUCCESS", "SUCCESS"),
+    }
+
+    result = hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["approved"] == [10]
+    assert dependabot_harness["merged"] == [10]
+    assert result["approved"] == 1
+
+
+def test_dry_run_still_reports_what_it_would_skip(dependabot_harness):
+    """dry_run only guards the WRITE calls; the read-only eligibility check
+    should still run so the preview matches what a real run would do."""
+    dependabot_harness["prs"] = [
+        {"number": 597, "title": "bump python from 3.11.1 to 3.11.2", "url": "u"}]
+    dependabot_harness["pr_data"][597] = {
+        "files": [], "statusCheckRollup": _rollup("FAILURE")}
+
+    result = hc.triage_dependabot_prs("o/r", "u", dry_run=True)
+
+    assert dependabot_harness["approved"] == []
+    assert result["skipped_failing_checks"] == 1
 
 
 def test_the_transient_scan_looks_at_the_failure_region_not_the_head(monkeypatch):

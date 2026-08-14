@@ -2,7 +2,9 @@
 """Daily health check: triage Dependabot PRs and failed workflow runs.
 
 For each open Dependabot PR:
-  - Minor/patch bumps and SHA-pin updates → approve + enable auto-merge
+  - Minor/patch bumps and SHA-pin updates → approve + enable auto-merge, unless
+    a check is failing or the PR touches .github/workflows/ (left for human
+    review either way — see triage_dependabot_prs())
   - Major version bumps → skip (leave for human review)
 
 For each failed scheduled or workflow_dispatch run (last LOOKBACK_HOURS):
@@ -692,6 +694,62 @@ def _is_major_bump(pr_title: str) -> bool:
     return bool(m and int(m.group(2)) > int(m.group(1)))
 
 
+def _pr_files_and_checks(repo: str, number: int) -> dict | None:
+    """Changed files + check-run rollup for one Dependabot PR.
+
+    None means the read itself failed (gh error, empty output, unparseable
+    JSON) — the caller must treat that the same as "unsafe to merge", never as
+    "no checks, no problem". Reading an absent result as a pass is a repeat of
+    a documented failure mode in this repo (infra-commons/meta#624, and the
+    #86 incident itself: a FAILURE the merge path never looked at).
+    """
+    raw = _gh("pr", "view", str(number), "--repo", repo,
+               "--json", "files,statusCheckRollup", check=False)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# Terminal-failure states. PENDING/IN_PROGRESS/QUEUED (or no conclusion at
+# all) is not a failure — the sweep runs while CI is still going, and
+# `gh pr merge --auto` is left to wait those out as it always has. CANCELLED
+# and SKIPPED are routine here too: adversarial-review's sub-jobs skip on
+# Dependabot PRs by design (github.actor != 'dependabot[bot]'), and
+# auto-merge's own Evaluate job is routinely CANCELLED by its own
+# cancel-in-progress concurrency group — treating either as a failure would
+# refuse essentially every Dependabot PR in the fleet (infra-commons/meta#624
+# is the same misreading in a different tool). ERROR is the StatusContext
+# (legacy commit-status) equivalent of FAILURE for CheckRun. STARTUP_FAILURE
+# is a terminal non-success too — the runner never came up, so the job never
+# ran and never validated anything; treating it as "not a failure" would let
+# a check that silently never executed read as a pass.
+_FAILING_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "ERROR",
+                         "STARTUP_FAILURE"}
+
+
+def _has_failing_check(rollup) -> bool:
+    """True if any check/status on the PR is in a terminal-failure state."""
+    for check in rollup or []:
+        state = (check.get("conclusion") or check.get("state") or "").upper()
+        if state in _FAILING_CONCLUSIONS:
+            return True
+    return False
+
+
+def _touches_workflow_files(files) -> bool:
+    """The same `.github/workflows/**` hard exclusion auto-merge-churn applies
+    to every other bot lane, as a self-privilege-escalation guard (a workflow
+    edit changes what CI itself runs) — see auto-merge-churn.py's
+    HARD_EXCLUDE. Dependabot PRs reach the same files (e.g. a
+    `github_actions`-group bump) and were not previously subject to it."""
+    return any((f.get("path") or "").startswith(".github/workflows/")
+               for f in (files or []))
+
+
 def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict:
     """Approve and enable auto-merge for eligible Dependabot PRs."""
     prs = _gh_json(
@@ -704,6 +762,7 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
     )
 
     approved = skipped_major = errors = already_approved = 0
+    skipped_unreadable = skipped_workflow_files = skipped_failing_checks = 0
 
     # The approve must run as a distinct identity — the Actions GITHUB_TOKEN is
     # forbidden from approving PRs. None when no approver App is wired (approve
@@ -722,6 +781,28 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
         if _is_major_bump(title):
             print(f"  SKIP major bump #{number}: {title}")
             skipped_major += 1
+            continue
+
+        # Read changed files + check conclusions BEFORE approving/merging —
+        # `gh pr merge --auto` only waits on required checks, so an advisory
+        # failure (e.g. the Dockerfile digest guard) is structurally invisible
+        # to it unless this function refuses first (#86).
+        data = _pr_files_and_checks(repo, number)
+        if data is None:
+            print(f"  SKIP #{number}: could not read changed files/check "
+                  f"status — leaving for manual review")
+            skipped_unreadable += 1
+            continue
+
+        if _touches_workflow_files(data.get("files")):
+            print(f"  SKIP #{number}: touches .github/workflows/ — same "
+                  f"exclusion auto-merge-churn applies; needs manual review")
+            skipped_workflow_files += 1
+            continue
+
+        if _has_failing_check(data.get("statusCheckRollup")):
+            print(f"  SKIP #{number}: a check is failing — leaving for manual review")
+            skipped_failing_checks += 1
             continue
 
         if dry_run:
@@ -760,6 +841,9 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
         "approved": approved,
         "already_approved": already_approved,
         "skipped_major": skipped_major,
+        "skipped_unreadable": skipped_unreadable,
+        "skipped_workflow_files": skipped_workflow_files,
+        "skipped_failing_checks": skipped_failing_checks,
         "errors": errors,
     }
 
@@ -1138,6 +1222,9 @@ def main() -> None:
             f"  approved={dep['approved']} | "
             f"already_approved={dep['already_approved']} | "
             f"skipped_major={dep['skipped_major']} | "
+            f"skipped_unreadable={dep['skipped_unreadable']} | "
+            f"skipped_workflow_files={dep['skipped_workflow_files']} | "
+            f"skipped_failing_checks={dep['skipped_failing_checks']} | "
             f"errors={dep['errors']}\n"
         )
 
