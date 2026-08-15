@@ -3,9 +3,20 @@ name: Security — Tier B (reusable)
 # Tier B security gate for internal tools, automation scripts, and repos
 # with secrets in play but no external users.
 #
-# Runs on every push/PR/schedule/dispatch: Gitleaks secret scan (blocking),
-#                                           Semgrep SAST (blocking on findings in changed files)
-# Runs on schedule/manual:                 Trivy dependency CVE scan (non-blocking, report only)
+# Runs on every push/PR:                   Gitleaks secret scan (blocking),
+#                                           Semgrep SAST (blocking on findings the push/PR introduces)
+# Runs on schedule/manual:                 Semgrep SAST (report only — no diff target to block on),
+#                                           Trivy dependency CVE scan (non-blocking, report only)
+#
+# infra-commons/security#103: Semgrep blocks on new findings only — via `--baseline-commit` against
+# the PR's merge base (pull_request) or the ref's previous tip (push) — never on a repo's
+# pre-existing backlog. A push whose previous commit doesn't exist (new branch, some force-pushes)
+# has no baseline to diff against and falls back to report-only, same as schedule/workflow_dispatch,
+# rather than blocking on the entire existing tree at once. See
+# reviews/2026-08-15-tier-b-semgrep-blast-radius-103.md for why this shape was chosen: the 3 Tier B
+# callers carrying pre-existing findings are all pinned away from this file already (ancient SHA /
+# frozen fork), so they're unaffected either way; only the 2 already-clean live callers reach this
+# code today.
 #
 # infra-commons/security#102: Semgrep used to be gated `if: github.event_name == 'pull_request'`.
 # A job whose `if:` is false still gets a check run — conclusion `skipped` — under its `name:`,
@@ -89,6 +100,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # --baseline-commit below needs real git history to compute a merge
+          # base / diff against — a shallow (depth-1) checkout only has HEAD.
+          fetch-depth: 0
 
       - name: Semgrep scan
         run: |
@@ -102,9 +117,40 @@ jobs:
           for cfg in ${{ inputs.semgrep_config }}; do
             CONFIG_FLAGS+=(--config "$cfg")
           done
-          # Non-zero exit on findings is acceptable here — we report, not block.
-          # Promote to exit-code 1 when the repo's baseline is clean.
-          semgrep scan "${CONFIG_FLAGS[@]}" --text || true
+
+          # infra-commons/security#103: block only findings this push/PR
+          # introduces, never a repo's pre-existing backlog — see the header
+          # comment above for why. BASELINE is the commit to diff against;
+          # left empty means "no diff target," which falls through to the
+          # original report-only behavior below.
+          BASELINE=""
+          case "${{ github.event_name }}" in
+            pull_request)
+              # Semgrep computes the merge base of HEAD and the ref we pass
+              # internally, so passing the base tip is correct "against the
+              # merge base" usage, not a diff against a possibly-stale tip.
+              BASELINE="${{ github.event.pull_request.base.sha }}"
+              ;;
+            push)
+              # github.event.before is all-zeros when there's no prior commit
+              # to diff against (new branch, first push, some force-pushes).
+              # Leave BASELINE empty in that case rather than diffing against
+              # a commit that doesn't exist.
+              if [[ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+                BASELINE="${{ github.event.before }}"
+              fi
+              ;;
+            # schedule / workflow_dispatch: not tied to a ref move, so there's
+            # no diff target — these are periodic full-repo audits, same as
+            # the Trivy job below. BASELINE stays empty.
+          esac
+
+          if [[ -n "$BASELINE" ]]; then
+            semgrep scan "${CONFIG_FLAGS[@]}" --baseline-commit "$BASELINE" --text --error
+          else
+            # No diff target: report-only, same behavior as before #103.
+            semgrep scan "${CONFIG_FLAGS[@]}" --text || true
+          fi
 
   # ── Dependency CVE scan (schedule + manual only) ─────────────────────────────
   trivy:
