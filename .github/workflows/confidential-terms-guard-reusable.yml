@@ -60,9 +60,25 @@ on:
         required: false
         default: ""
     secrets:
+      # Two ways to authenticate the clients-config read, and the job fails closed
+      # unless exactly one of them is satisfied. Neither is `required: true`, so a
+      # caller can carry either — which is what lets the eleven callers cut over
+      # one at a time instead of in a flag day.
       clients_config_token:
-        description: Read token for the private clients-config repo (fail closed when absent).
-        required: true
+        description: >-
+          PAT with Contents:read on the clients-config repo. Legacy path. Prefer the
+          App pair below: a stored token expires, and its expiry is invisible until
+          every caller's guard goes red at once (2026-08-15).
+        required: false
+      clients_config_app_id:
+        description: >-
+          App ID of a GitHub App installed on the clients-config org. Used with
+          clients_config_private_key to mint a short-lived, repo-scoped token per
+          run, so there is no stored credential to expire.
+        required: false
+      clients_config_private_key:
+        description: Private key matching clients_config_app_id.
+        required: false
 
 jobs:
   scan:
@@ -78,24 +94,60 @@ jobs:
     # ever touch dependency/workflow-pin lines — no risk of a confidential
     # term slipping in.
     if: ${{ !github.event.pull_request.draft && github.actor != 'dependabot[bot]' }}
+    # `secrets` is NOT a context GitHub permits in a step-level `if:`. Written that
+    # way the WHOLE WORKFLOW fails validation before it starts — zero check-runs, no
+    # logs, and `gh run list` shows the file path where the workflow name should be.
+    # That exact mistake took capture-findings down in four repos for three hours on
+    # 2026-08-13. Mapping the secrets to job-level env here is what makes the
+    # credential-mode branch below expressible at all; do not "simplify" it back.
+    env:
+      CFG_APP_ID: ${{ secrets.clients_config_app_id }}
+      CFG_PRIVATE_KEY: ${{ secrets.clients_config_private_key }}
+      CFG_TOKEN: ${{ secrets.clients_config_token }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # Fail closed: without the token we cannot build the denylist, and a
+      # Fail closed: without a credential we cannot build the denylist, and a
       # silent empty list would let a real name slip through unnoticed.
-      - name: Require clients-config read token (fail closed)
+      - name: Select the clients-config credential (fail closed)
+        id: cred
         env:
-          CLIENTS_CONFIG_TOKEN: ${{ secrets.clients_config_token }}
+          CONFIG_REPO: ${{ inputs.config_repo }}
         run: |
-          if [ -z "$CLIENTS_CONFIG_TOKEN" ]; then
-            echo "::error::clients_config_token is unset/empty — cannot build the confidential-terms denylist. Refusing to fail open." >&2
+          set -euo pipefail
+          if [ -n "$CFG_APP_ID" ] && [ -n "$CFG_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$CFG_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer clients_config_app_id + clients_config_private_key."
+          else
+            echo "::error::No clients-config credential: set clients_config_app_id AND clients_config_private_key, or clients_config_token. Cannot build the confidential-terms denylist. Refusing to fail open." >&2
             exit 1
           fi
+          # Split once here so the mint step can scope the token to exactly this
+          # one repo rather than the whole installation.
+          echo "owner=${CONFIG_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${CONFIG_REPO##*/}"  >> "$GITHUB_OUTPUT"
 
+      - name: Mint a repo-scoped installation token
+        id: cfgtoken
+        if: steps.cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.CFG_APP_ID }}
+          private-key: ${{ env.CFG_PRIVATE_KEY }}
+          owner: ${{ steps.cred.outputs.owner }}
+          # Narrower than the installation itself: this token can read only the
+          # config repo, whatever else the App is installed on.
+          repositories: ${{ steps.cred.outputs.repo }}
+
+      # A skipped step's outputs are the empty string, so `||` falls through to the
+      # legacy PAT without needing a second `if:` on this checkout.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.config_repo }}
-          token: ${{ secrets.clients_config_token }}
+          token: ${{ steps.cfgtoken.outputs.token || secrets.clients_config_token }}
           path: clients-config
 
       - name: Install PyYAML
