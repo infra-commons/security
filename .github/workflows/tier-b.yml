@@ -3,14 +3,26 @@ name: Security — Tier B (reusable)
 # Tier B security gate for internal tools, automation scripts, and repos
 # with secrets in play but no external users.
 #
-# Runs on every push/PR:   Gitleaks secret scan (blocking)
-# Runs on every PR:        Semgrep SAST (blocking on findings in changed files)
-# Runs on schedule/manual: Trivy dependency CVE scan (non-blocking, report only)
+# Runs on every push/PR/schedule/dispatch: Gitleaks secret scan (blocking),
+#                                           Semgrep SAST (blocking on findings in changed files)
+# Runs on schedule/manual:                 Trivy dependency CVE scan (non-blocking, report only)
+#
+# infra-commons/security#102: Semgrep used to be gated `if: github.event_name == 'pull_request'`.
+# A job whose `if:` is false still gets a check run — conclusion `skipped` — under its `name:`,
+# and a skipped check satisfies a required status-check context. A caller subscribed to both
+# `push:` and `pull_request:` would race two check runs under the same required name on the same
+# head SHA, and the push run (skipped, no scan) was the one most likely to land last and win,
+# because skipping is faster than scanning. Semgrep now runs unconditionally instead — it scans
+# the checked-out ref, not a PR diff, so there is no event it can't meaningfully run on.
 #
 # Caller pattern:
 #
 #   on:
-#     push: {}
+#     push:
+#       branches: [main]   # your integration branch(es) — never leave this unfiltered; an
+#                           # unfiltered `push: {}` still double-fires with `pull_request:` on any
+#                           # branch that also has an open PR (belt: the unconditional job above;
+#                           # this is the braces)
 #     pull_request:
 #       types: [opened, synchronize, reopened]
 #     schedule:
@@ -68,10 +80,9 @@ jobs:
             ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
             detect --source=/repo --redact --verbose --exit-code=1
 
-  # ── SAST (PR to main only) ────────────────────────────────────────────────────
+  # ── SAST (every trigger — see #102 above) ─────────────────────────────────────
   semgrep:
     name: SAST (Semgrep)
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

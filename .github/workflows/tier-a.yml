@@ -3,18 +3,29 @@ name: Security — Tier A (reusable)
 # Tier A security gate for production repos, client-facing systems, and
 # any repo with Azure credentials or customer data in play.
 #
-# Runs on every push/PR:    Gitleaks secret scan (blocking)
-# Runs on every PR:         Semgrep SAST + adversarial AI review (blocking on CRITICAL)
-# Runs on schedule/manual:  Trivy CVE scan + optional full AI review
+# Runs on every push/PR/schedule/dispatch: Gitleaks secret scan (blocking),
+#                                           Semgrep SAST (blocking on findings in changed files)
+# Runs on every PR:                        Adversarial AI review (blocking on CRITICAL)
+# Runs on schedule/manual:                 Trivy CVE scan + optional full AI review
 #
 # The adversarial AI review is the heavyweight check — it blocks merge on
 # CRITICAL findings. Make the `adversarial-review / gate` check required
 # in branch protection settings.
 #
+# infra-commons/security#102: Semgrep used to be gated `if: github.event_name == 'pull_request'`.
+# A job whose `if:` is false still gets a check run — conclusion `skipped` — under its `name:`,
+# and a skipped check satisfies a required status-check context, so a caller subscribed to both
+# `push:` and `pull_request:` could have the never-scanned push run win a race against the real PR
+# scan on the same head SHA. Semgrep now runs unconditionally instead (see the job below for why
+# `adversarial-review` could not get the same fix).
+#
 # Caller pattern:
 #
 #   on:
-#     push: {}
+#     push:
+#       branches: [main]   # your integration branch(es) — never leave this unfiltered; an
+#                           # unfiltered `push: {}` still double-fires with `pull_request:` on any
+#                           # branch that also has an open PR
 #     pull_request:
 #       types: [opened, synchronize, reopened]
 #     schedule:
@@ -86,10 +97,9 @@ jobs:
             ghcr.io/gitleaks/gitleaks:v8.18.4@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba \
             detect --source=/repo --redact --verbose --exit-code=1
 
-  # ── SAST (PR only) ────────────────────────────────────────────────────────────
+  # ── SAST (every trigger — see #102 above) ─────────────────────────────────────
   semgrep:
     name: SAST (Semgrep)
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -117,6 +127,21 @@ jobs:
   # GitHub resolves chained `uses:` refs independently — @main would always pull
   # the latest regardless of which SHA tier-a.yml was called at. Update this SHA
   # alongside any breaking change to adversarial-review-reusable.yml.
+  #
+  # infra-commons/security#102: this job has the same "if: false still reports a satisfying
+  # skipped check" shape as the semgrep job above, but it CANNOT get the same fix (dropping the
+  # `if:` so it always does real work). Traced what actually happens on a non-PR event: the
+  # reusable's `claude`/`openai` jobs gate on `github.event.pull_request.head.repo.full_name`,
+  # which is empty outside a PR, so both skip; its `gate` job runs anyway (`if: always()`) and —
+  # per that job's own doc, "a reviewer that was asked to run was skipped" — renders a hard
+  # `blocked` failure, not a pass. Dropping this `if:` would flip the bug from false-pass-on-push
+  # to permanent false-fail-on-push, which would break every caller using this file's own
+  # recommended `push:` trigger the moment one exists. Unlike Semgrep, a PR-diff AI review has no
+  # meaningful non-PR equivalent to fall back to; the real fix is preventing this check run from
+  # being created at all on non-PR events, which needs the caller to invoke a PR-only reusable
+  # from a separately-triggered job rather than gating a job inside this one — out of scope here.
+  # There is no live caller of tier-a.yml today, so this gap is currently dormant; don't "fix" it
+  # by analogy with the semgrep change above without re-deriving the above first.
   adversarial-review:
     if: github.event_name == 'pull_request'
     uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@79a6885cc67dba7eb40d655de959e3a2eb9367f3
