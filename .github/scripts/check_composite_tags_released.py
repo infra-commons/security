@@ -88,10 +88,35 @@ _USES_RE = re.compile(
 _MOVING_TAG_RE = re.compile(r"^[A-Za-z0-9._-]+/v\d+$")
 
 
-def git(*args: str, cwd: Path) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
-    ).stdout.strip()
+def _redact(text: str) -> str:
+    """Strip anything that looks like a credential before it reaches a log.
+
+    The release job runs as GITHUB_TOKEN, delivered to git via actions/checkout's
+    default extraheader (persist-credentials: true) — never embedded in the
+    remote URL. Nothing here is known to leak, but git's own verbose/error
+    output is not something this script controls, so redact defensively rather
+    than assume it is clean.
+    """
+    text = re.sub(r"x-access-token:[^@\s]+@", "x-access-token:***@", text)
+    text = re.sub(r"https://[^/\s@]+:[^/\s@]+@", "https://***@", text)
+    text = re.sub(r"(?i)authorization:.*", "Authorization: ***", text)
+    text = re.sub(r"\b(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]+", "***", text)
+    return text
+
+
+def git(*args: str, cwd: Path, quiet: bool = False) -> str:
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        if not quiet:
+            detail = _redact((exc.stderr or exc.stdout or "").strip()).replace("\n", " | ")
+            print(
+                f"::error::git {' '.join(args)} failed (exit {exc.returncode}): "
+                f"{detail[:300] or '(no output captured)'}"
+            )
+        raise
 
 
 def discover_pins(root: Path) -> dict[str, str]:
@@ -148,7 +173,7 @@ def moving_tag_for(family: str, root: Path) -> str | None:
     and a delivery contract that lives in a comment is not one this can rely on.
     """
     try:
-        out = git("tag", "--list", f"{family}/v*", cwd=root)
+        out = git("tag", "--list", f"{family}/v*", cwd=root, quiet=True)
     except subprocess.CalledProcessError:
         return None
     moving = sorted(t.strip() for t in out.splitlines() if _MOVING_TAG_RE.match(t.strip()))
@@ -183,7 +208,7 @@ def tree_at(ref: str, path: str, root: Path) -> str | None:
     is what lets one comparison cover both halves of a family's surface.
     """
     try:
-        return git("rev-parse", f"{ref}:{path}", cwd=root)
+        return git("rev-parse", f"{ref}:{path}", cwd=root, quiet=True)
     except subprocess.CalledProcessError:
         return None
 
