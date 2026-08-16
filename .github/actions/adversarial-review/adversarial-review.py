@@ -951,13 +951,32 @@ def cache_marker(key: str, critical: bool) -> str:
     )
 
 
-def find_cached_verdict(bodies, marker: str, key: str):
-    """The stored verdict for `key`, or None when this diff has not been reviewed.
+# The identity this action's own comments carry when the default GITHUB_TOKEN
+# posts them (see post_comment). GitHub attributes any comment made with the
+# automatic per-run token to exactly this bot account — not configurable, not
+# environment-dependent: every caller goes through adversarial-review-reusable.yml,
+# which always passes `github-token: ${{ github.token }}`, never a minted App token.
+# Checking `login` rather than `user.type == "Bot"` is deliberate: `type` alone
+# would also match a forged comment from a *different* bot account.
+TRUSTED_COMMENT_AUTHOR = "github-actions[bot]"
 
-    Scans only comments carrying this provider's own marker, so the Claude
-    reviewer can never read the OpenAI reviewer's verdict back as its own.
+
+def find_cached_verdict(comments, marker: str, key: str):
+    """The stored verdict for `key`, or None when this diff has not been
+    reviewed by this action itself.
+
+    Scans only comments that are BOTH carrying this provider's own marker AND
+    posted by this action's own GitHub identity (TRUSTED_COMMENT_AUTHOR). The
+    marker alone is not trustworthy: anyone who can comment on the PR can paste
+    a well-formed marker and a correctly-keyed cache line into a comment of
+    their own. A comment whose author cannot be confirmed as this action's own
+    bot identity is treated exactly like a comment without the marker at all —
+    a miss, never a hit.
     """
-    for body in bodies:
+    for c in comments:
+        if c.get("login") != TRUSTED_COMMENT_AUTHOR:
+            continue
+        body = c.get("body", "")
         if marker not in body:
             continue
         match = _CACHE_RE.search(body)
@@ -966,7 +985,13 @@ def find_cached_verdict(bodies, marker: str, key: str):
     return None
 
 
-def fetch_comment_bodies(token: str, repo: str, pr_number: int) -> list:
+def fetch_comments(token: str, repo: str, pr_number: int) -> list[dict]:
+    """Each comment's body alongside the identity that posted it, so
+    find_cached_verdict can verify authorship rather than trusting body text
+    alone. `user` can be null/missing in GitHub's response (e.g. a ghost or
+    deleted account) — that degrades to an empty login, which never matches
+    TRUSTED_COMMENT_AUTHOR, rather than raising.
+    """
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         resp = client.get(
             f"{GITHUB_API}/repos/{repo}/issues/{pr_number}/comments",
@@ -974,7 +999,14 @@ def fetch_comment_bodies(token: str, repo: str, pr_number: int) -> list:
             params={"per_page": 100},
         )
         resp.raise_for_status()
-        return [c.get("body", "") for c in resp.json()]
+        return [
+            {
+                "body": c.get("body", ""),
+                "login": (c.get("user") or {}).get("login", ""),
+                "type": (c.get("user") or {}).get("type", ""),
+            }
+            for c in resp.json()
+        ]
 
 
 def _note_cache_hit(label: str, key: str) -> None:
@@ -1187,7 +1219,7 @@ def main() -> None:
     cached_critical = None
     try:
         cached_critical = find_cached_verdict(
-            fetch_comment_bodies(token, repo, pr_number), marker, cache_key
+            fetch_comments(token, repo, pr_number), marker, cache_key
         )
     except Exception as exc:
         print(f"Warning: could not read the review cache: {exc}", file=sys.stderr)
