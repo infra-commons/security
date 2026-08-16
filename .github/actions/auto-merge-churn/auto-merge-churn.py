@@ -197,6 +197,7 @@ def main() -> None:
     print(f"auto-merge-churn: ELIGIBLE ({decision.basis}) — approving #{num} in {repo}")
 
     # Approve (satisfies reviews:1; bot != PR author so it counts).
+    approved = False
     try:
         subprocess.run(
             ["gh", "pr", "review", num, "--repo", repo, "--approve", "--body",
@@ -204,12 +205,25 @@ def main() -> None:
              f"Required checks still gate the merge. Run: {run_url}"],
             capture_output=True, text=True, check=True)
         print("  approved")
+        approved = True
     except subprocess.CalledProcessError as exc:
         err = (exc.stderr or "").lower()
         if "already" in err or "can't approve" in err or "cannot approve" in err:
             print("  already approved")
+            approved = True
         else:
             print(f"  WARNING: approval failed: {exc.stderr.strip()[:120]}", file=sys.stderr)
+
+    # The reusable workflow's own docs promise that a genuine approval failure
+    # "fails soft (the PR simply waits for a human)" — i.e. auto-merge must NOT
+    # get armed on a PR nobody has actually approved yet. Enabling `--auto`
+    # anyway would silently defeat the distinct-4th-identity approval gate: the
+    # very next incidental human review approval would fire the merge
+    # immediately, with no one realizing auto-merge was already switched on.
+    if not approved:
+        print("  approval did not succeed; leaving auto-merge OFF so the PR waits "
+              "for a human, as documented.", file=sys.stderr)
+        return
 
     if not decision.enable_auto_merge:
         print(f"  suppression file(s) touched ({list(decision.suppression_files)}); leaving "
