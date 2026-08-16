@@ -173,3 +173,64 @@ def test_truncated_completion_raises(monkeypatch):
 def test_truncation_error_is_not_an_infra_error():
     # Must fail the job (and so block the gate), not fail open like a 5xx.
     assert adv._is_infra_error("openai", RuntimeError("token budget")) is False
+
+
+# ── Anthropic completion guards ─────────────────────────────────────────────────
+#
+# Mirrors the OpenAI section above. security#109 added call_anthropic's guard
+# (call_openai already had it) but shipped no tests for it — these close that
+# gap so a regression on the Anthropic path is caught the same way.
+
+def _fake_anthropic(monkeypatch, *, content_blocks, stop_reason="end_turn"):
+    """Install a fake Anthropic client returning a single chosen message."""
+    message = SimpleNamespace(content=content_blocks, stop_reason=stop_reason)
+
+    class _Messages:
+        def create(self, **kwargs):
+            _Messages.kwargs = kwargs
+            return message
+
+    class _Client:
+        def __init__(self, api_key=None):
+            self.messages = _Messages()
+
+    import anthropic
+
+    monkeypatch.setattr(anthropic, "Anthropic", _Client)
+    return _Messages
+
+
+def test_anthropic_returns_content_on_success(monkeypatch):
+    _fake_anthropic(monkeypatch, content_blocks=[SimpleNamespace(text="### CRITICAL\n- something")])
+    out = adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+    assert "CRITICAL" in out
+
+
+def test_anthropic_empty_completion_raises_rather_than_reading_as_clean(monkeypatch):
+    # The failure this guards: message.content comes back an empty list, content
+    # resolves to "", has_critical_findings("") returns False, and the gate
+    # passes having reviewed nothing.
+    _fake_anthropic(monkeypatch, content_blocks=[])
+    with pytest.raises(RuntimeError, match="empty completion"):
+        adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
+def test_anthropic_whitespace_only_completion_raises(monkeypatch):
+    _fake_anthropic(monkeypatch, content_blocks=[SimpleNamespace(text="   \n  ")])
+    with pytest.raises(RuntimeError, match="empty completion"):
+        adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
+def test_anthropic_truncated_completion_raises(monkeypatch):
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[SimpleNamespace(text="### CRITICAL\n- partial")],
+        stop_reason="max_tokens",
+    )
+    with pytest.raises(RuntimeError, match="token budget"):
+        adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
+def test_anthropic_truncation_error_is_not_an_infra_error():
+    # Must fail the job (and so block the gate), not fail open like a 5xx.
+    assert adv._is_infra_error("anthropic", RuntimeError("token budget")) is False
