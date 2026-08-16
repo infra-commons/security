@@ -32,8 +32,16 @@ def key(*args):
     return adv.review_cache_key(*args)
 
 
-def comment(marker, k, critical=False, extra=""):
-    return f"{marker}\n{adv.cache_marker(k, critical)}\n## Review\n{extra}"
+def comment(marker, k, critical=False, extra="", login=None):
+    body = f"{marker}\n{adv.cache_marker(k, critical)}\n## Review\n{extra}"
+    return bot(body, login=login)
+
+
+def bot(body, login=None):
+    """Wrap a raw comment body with a trusted author. Authorship is not what
+    this file's tests exercise — that axis belongs to test_cache_authenticity.py —
+    so every fixture here defaults to this action's own posting identity."""
+    return {"body": body, "login": login or adv.TRUSTED_COMMENT_AUTHOR, "type": "Bot"}
 
 
 # ── the key: what must and must not change it ─────────────────────────────────
@@ -94,7 +102,7 @@ def test_a_comment_without_the_cache_line_is_a_miss():
     """Older reviewer comments carry the marker and no cache line. They must not
     be read as 'reviewed, nothing found'."""
     old = f"{MARKER}\n## Adversarial AI Security Review\nNo findings."
-    assert adv.find_cached_verdict([old], MARKER, key(*ARGS)) is None
+    assert adv.find_cached_verdict([bot(old)], MARKER, key(*ARGS)) is None
 
 
 def test_no_comments_at_all_is_a_miss():
@@ -106,7 +114,7 @@ def test_a_cache_line_from_an_unrelated_comment_is_ignored():
     grant a PR a free pass."""
     k = key(*ARGS)
     drive_by = f"I think {adv.cache_marker(k, False)} means it is fine?"
-    assert adv.find_cached_verdict([drive_by], MARKER, k) is None
+    assert adv.find_cached_verdict([bot(drive_by)], MARKER, k) is None
 
 
 def test_a_malformed_or_non_matching_cache_line_is_a_miss():
@@ -121,14 +129,14 @@ def test_a_malformed_or_non_matching_cache_line_is_a_miss():
     """
     for bad in ("key=short critical=false", "key=" + "0" * 64, "key=" + "z" * 64 + " critical=false"):
         body = f"{MARKER}\n<!-- adversarial-review-cache v1 {bad} -->"
-        assert adv.find_cached_verdict([body], MARKER, key(*ARGS)) is None, bad
+        assert adv.find_cached_verdict([bot(body)], MARKER, key(*ARGS)) is None, bad
 
 
 def test_a_future_cache_version_is_not_read_as_v1():
     """A later format change must miss rather than be parsed under the old rules."""
     k = key(*ARGS)
     body = f"{MARKER}\n<!-- adversarial-review-cache v2 key={k} critical=false -->"
-    assert adv.find_cached_verdict([body], MARKER, k) is None
+    assert adv.find_cached_verdict([bot(body)], MARKER, k) is None
 
 
 def test_the_first_matching_comment_wins_and_a_stale_one_does_not_mask_it():
@@ -146,5 +154,5 @@ def test_the_marker_this_action_writes_is_the_one_it_can_read(critical):
     """Writer and reader must agree. If they drift, every run is a miss and the
     cache silently does nothing — a dead filter that looks exactly like a cold one."""
     k = key(*ARGS)
-    assert adv.find_cached_verdict([f"{MARKER}\n{adv.cache_marker(k, critical)}"],
+    assert adv.find_cached_verdict([bot(f"{MARKER}\n{adv.cache_marker(k, critical)}")],
                                    MARKER, k) is critical
