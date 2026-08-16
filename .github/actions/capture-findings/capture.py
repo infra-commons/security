@@ -470,7 +470,24 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
         system=SYSTEM_PROMPT + suppression_context,
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
     )
-    return msg.content[0].text
+    content = msg.content[0].text if msg.content else ""
+
+    # An empty or truncated completion must NOT read as "no findings": parse_findings()
+    # would silently return [] (its JSON-extraction failure path just logs a warning),
+    # indistinguishable from a diff that genuinely had nothing to report — and this is
+    # the CRITICAL gate, so that reads as "job passes, nothing filed." Raise instead so
+    # a truncated review fails the job rather than silently clearing it.
+    if not content or not content.strip():
+        raise RuntimeError(
+            "claude-sonnet-4-6 returned an empty completion (stop_reason="
+            f"{msg.stop_reason!r}) — review did not run; not treating as clean."
+        )
+    if msg.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "claude-sonnet-4-6 hit the token budget before finishing the review "
+            "(stop_reason='max_tokens') — findings may be truncated; not treating as clean."
+        )
+    return content
 
 
 def parse_findings(text: str) -> list[dict]:
