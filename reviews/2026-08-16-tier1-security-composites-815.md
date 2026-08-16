@@ -5,8 +5,9 @@
 `capture-findings` were already covered (PR #110, #111, merged;
 `reviews/2026-08-16-tier1-adversarial-review-815.md`).
 
-`main` at review time: `5db28e5`. Fixes below landed as a follow-up branch off that SHA
-— see the PR for the exact commit.
+`main` at review time: `5db28e5`. Fixes below landed in
+[PR #112](https://github.com/infra-commons/security/pull/112), branched off that SHA — not
+merged by this pass, left for review.
 
 ## Method
 
