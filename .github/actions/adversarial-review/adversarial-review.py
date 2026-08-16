@@ -401,7 +401,25 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
         }],
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
     )
-    return message.content[0].text
+    content = message.content[0].text if message.content else ""
+
+    # An empty or truncated completion must NOT read as "no findings": that is a
+    # silent fail-open, indistinguishable from a clean review. Raise instead —
+    # a non-infra exception fails the job, and the gate blocks on a failed job.
+    # (Mirrors the same guard in call_openai() below — Claude has no equivalent
+    # built-in check, so a mid-review cutoff was silently reading as "reviewed,
+    # no critical findings" instead of failing the run.)
+    if not content or not content.strip():
+        raise RuntimeError(
+            f"{model} returned an empty completion (stop_reason="
+            f"{message.stop_reason!r}) — review did not run; not treating as clean."
+        )
+    if message.stop_reason == "max_tokens":
+        raise RuntimeError(
+            f"{model} hit the token budget before finishing the review "
+            "(stop_reason='max_tokens') — findings may be truncated; not treating as clean."
+        )
+    return content
 
 
 def call_openai(api_key: str, model: str, diff: str, context: str, system_prompt: str) -> str:
