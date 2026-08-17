@@ -172,7 +172,11 @@ jobs:
       - name: Install dependencies
         # `security-scan.py` imports httpx at module scope, so importing the module
         # under test needs it even though every network call is monkeypatched out.
-        run: pip install pytest==8.3.4 httpx==0.28.1
+        # `anthropic`/`openai` are only imported lazily inside call_claude()/
+        # call_gpt4o(), so no test needed them installed until security#815 added
+        # direct coverage for their truncation guards (mirrors the identical gap
+        # fixed for adversarial-review/capture-findings in the same sweep).
+        run: pip install pytest==8.3.4 anthropic==0.49.0 openai==1.75.0 httpx==0.28.1
 
       - name: Run tests
         # This action can CLOSE issues in every consuming repo, and it had no test

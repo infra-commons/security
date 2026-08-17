@@ -301,7 +301,16 @@ mechanical   = true for: clearly fixable with a small edit to a workflow/config 
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        # A truncated completion must not be parsed as if it were complete —
+        # today's JSON-parse-plus-required-keys check below only incidentally
+        # catches this (mid-JSON cutoffs usually fail to parse); make it
+        # explicit so the safety property doesn't depend on that coincidence.
+        # Mirrors the same guard in adversarial-review.py's call_anthropic().
+        if msg.stop_reason == "max_tokens":
+            raise ValueError(
+                "Claude hit the token budget before finishing (stop_reason='max_tokens')"
+            )
+        raw = msg.content[0].text.strip() if msg.content else ""
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         result = json.loads(raw)
         for key in ("is_transient", "root_cause", "fix", "severity", "mechanical"):
@@ -411,7 +420,14 @@ If you cannot identify a single confident fix, return: {{"old_string": null}}"""
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        # A truncated completion must not be parsed as a confident fix — make the
+        # check explicit rather than relying on truncated JSON happening to fail
+        # to parse. Mirrors the guard in diagnose_with_claude() above.
+        if msg.stop_reason == "max_tokens":
+            raise ValueError(
+                "Claude hit the token budget before finishing (stop_reason='max_tokens')"
+            )
+        raw = msg.content[0].text.strip() if msg.content else ""
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         fix = json.loads(raw)
     except Exception as exc:

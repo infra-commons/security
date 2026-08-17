@@ -484,7 +484,7 @@ def prompt_recorder(monkeypatch):
         def create(self, **kwargs):
             prompts.append(kwargs["messages"][0]["content"])
             block = type("Block", (), {"text": _REPLY})()
-            return type("Msg", (), {"content": [block]})()
+            return type("Msg", (), {"content": [block], "stop_reason": "end_turn"})()
 
     class _FakeClient:
         def __init__(self, **kwargs):
@@ -503,6 +503,56 @@ def test_the_diagnosis_prompt_carries_the_failure_region(prompt_recorder):
     prompt = prompt_recorder[0]
     assert "needs to be imported into the State" in prompt
     assert "Runner provisioning line 0\n" not in prompt
+
+
+def test_diagnose_with_claude_falls_back_on_max_tokens_truncation(monkeypatch):
+    # infra-commons/security#815: a truncated completion was only incidentally
+    # caught (JSON usually fails to parse mid-cutoff) — make the stop_reason
+    # check explicit so this doesn't depend on that coincidence, and pin that
+    # the fallback path (not a parsed-but-garbage result) is what's returned.
+    class _FakeMessages:
+        def create(self, **kwargs):
+            block = type("Block", (), {"text": '{"is_transient": false, "root_cause"'})()
+            return type("Msg", (), {"content": [block], "stop_reason": "max_tokens"})()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(hc, "anthropic_sdk", type("SDK", (), {"Anthropic": _FakeClient}))
+
+    result = hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")
+    assert result == hc._diagnose_fallback(hc.select_log_excerpt(DEPLOY_LOG, 12_000))
+
+
+def test_try_autofix_declines_on_max_tokens_truncation(monkeypatch, tmp_path):
+    class _FakeMessages:
+        def create(self, **kwargs):
+            block = type("Block", (), {"text": '{"old_string": "x"'})()
+            return type("Msg", (), {"content": [block], "stop_reason": "max_tokens"})()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(hc, "anthropic_sdk", type("SDK", (), {"Anthropic": _FakeClient}))
+    monkeypatch.chdir(tmp_path)
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "deploy.yml").write_text("name: deploy\n")
+
+    fix = hc.try_autofix(
+        repo="o/r",
+        workflow_name="wf",
+        workflow_file_path=".github/workflows/deploy.yml",
+        log_excerpt=DEPLOY_LOG,
+        diagnosis={"root_cause": "r", "fix": "f"},
+        health_run_url="u",
+        dry_run=True,
+    )
+    assert fix is None
 
 
 def test_the_autofix_prompt_carries_the_failure_region(prompt_recorder, tmp_path,

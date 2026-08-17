@@ -196,3 +196,61 @@ def test_precheck_and_decide_agree_on_the_cheap_rejections(repo, author):
 
 def test_precheck_passes_a_normal_pr_through():
     assert churn.precheck(REPO, BOT) is None
+
+
+# ── main(): auto-merge must not get armed on a genuine approve failure ───────────
+#
+# infra-commons/security#815: the reusable workflow documents "if the approver App
+# is omitted, the approve step fails soft (the PR simply waits for a human)" — i.e.
+# a real approval failure must leave auto-merge OFF. A prior version enabled
+# `gh pr merge --auto` unconditionally after a failed approve, silently arming
+# auto-merge for the next incidental human approval.
+
+def _set_main_env(monkeypatch, repo=REPO, num="1", author=BOT, run_url="http://run"):
+    monkeypatch.setenv("GH_REPO", repo)
+    monkeypatch.setenv("PR_NUMBER", num)
+    monkeypatch.setenv("PR_AUTHOR", author)
+    monkeypatch.setenv("RUN_URL", run_url)
+    monkeypatch.delenv("ALLOWED_GLOBS", raising=False)
+
+
+def test_main_does_not_enable_auto_merge_when_approve_fails(monkeypatch):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json",
+                        lambda *a: {"files": [{"path": ALLOWED_FILE}], "labels": []})
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "review"]:
+            raise churn.subprocess.CalledProcessError(
+                1, cmd, output="", stderr="HTTP 403: token lacks approve permission")
+        raise AssertionError(f"must not reach: {cmd}")
+
+    monkeypatch.setattr(churn.subprocess, "run", fake_run)
+    churn.main()
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd in calls)
+
+
+@pytest.mark.parametrize("stderr", ["already approved", "you can't approve your own PR"])
+def test_main_still_enables_auto_merge_when_already_approved(monkeypatch, stderr):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json",
+                        lambda *a: {"files": [{"path": ALLOWED_FILE}], "labels": []})
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "pr", "review"]:
+            raise churn.subprocess.CalledProcessError(1, cmd, output="", stderr=stderr)
+        class R:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return R()
+
+    monkeypatch.setattr(churn.subprocess, "run", fake_run)
+    churn.main()
+    assert any(cmd[:3] == ["gh", "pr", "merge"] for cmd in calls)

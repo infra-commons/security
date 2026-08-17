@@ -419,7 +419,26 @@ def call_claude(api_key: str, chunk: str, codebase: str, suppression_context: st
         system=system,
         messages=[{"role": "user", "content": user}],
     )
-    return msg.content[0].text
+    content = msg.content[0].text if msg.content else ""
+
+    # An empty or truncated completion must NOT read as "no findings": that is a
+    # silent fail-open, indistinguishable from a clean scan — this AI reviewer's
+    # entire job is to find CRITICAL/HIGH issues, and a mid-scan cutoff would
+    # otherwise degrade to a single LOW "parse error" placeholder while silently
+    # discarding everything the model had already found. Raise instead — a
+    # non-infra exception fails the job rather than passing it. Mirrors the
+    # guard in adversarial-review.py's call_anthropic()/call_openai().
+    if not content or not content.strip():
+        raise RuntimeError(
+            f"claude-sonnet-4-6 returned an empty completion (stop_reason="
+            f"{msg.stop_reason!r}) — scan did not run; not treating as clean."
+        )
+    if msg.stop_reason == "max_tokens":
+        raise RuntimeError(
+            "claude-sonnet-4-6 hit the token budget before finishing the scan "
+            "(stop_reason='max_tokens') — findings may be truncated; not treating as clean."
+        )
+    return content
 
 
 def call_gpt4o(api_key: str, chunk: str, codebase: str, suppression_context: str = "") -> str:
@@ -446,7 +465,22 @@ def call_gpt4o(api_key: str, chunk: str, codebase: str, suppression_context: str
             {"role": "user", "content": user},
         ],
     )
-    return resp.choices[0].message.content
+    choice = resp.choices[0]
+    content = choice.message.content
+
+    # Same guard as call_claude() above — an empty or truncated completion must
+    # NOT read as "no findings." Raise instead of returning garbage to the parser.
+    if not content or not content.strip():
+        raise RuntimeError(
+            f"gpt-4o returned an empty completion (finish_reason="
+            f"{choice.finish_reason!r}) — scan did not run; not treating as clean."
+        )
+    if choice.finish_reason == "length":
+        raise RuntimeError(
+            "gpt-4o hit the token budget before finishing the scan "
+            "(finish_reason='length') — findings may be truncated; not treating as clean."
+        )
+    return content
 
 
 # ── Finding parsing ────────────────────────────────────────────────────────────
