@@ -182,3 +182,77 @@ def test_every_title_the_scan_can_author_is_recognised_as_its_own():
 def test_the_dashboard_title_is_not_treated_as_scanner_authored():
     """It is skipped explicitly today; it must not start matching the prefix by accident."""
     assert not scan.is_scanner_authored_title(scan.SECURITY_STATUS_TITLE)
+
+
+# ── A scanner that did not run is not a scanner that found nothing ─────────────
+# Second instance of this file's own rule, reached from the other direction. Above, the
+# issue was unrecognisable to the scan; here the SCANNER is missing. Every parser returns
+# [] for a missing artifact and `download-artifact` is `continue-on-error: true`, so a
+# failed Semgrep job leaves no semgrep titles in `expected_titles` and every open Semgrep
+# issue reads as resolved. Recorded as a CRITICAL fail-open in
+# reviews/2026-08-16-tier1-adversarial-review-815.md.
+
+@pytest.fixture
+def reconcile_without_artifact(monkeypatch, tmp_path):
+    """Like `reconcile`, but the named scanner's artifact does not exist on disk —
+    the on-disk state a failed scanner job actually leaves behind."""
+    def _run(open_issues: list[dict], env_var: str) -> list[int]:
+        closed: list[int] = []
+
+        monkeypatch.setattr(scan, "ensure_labels_exist", lambda *a, **k: None)
+        monkeypatch.setattr(
+            scan,
+            "fetch_open_security_issues",
+            lambda *a, **k: ({i["title"]: i for i in open_issues}, False),
+        )
+        monkeypatch.setattr(
+            scan, "close_issue", lambda _t, _r, number, _u: closed.append(number)
+        )
+        monkeypatch.setattr(scan, "create_issue", lambda *a, **k: None)
+        monkeypatch.setattr(scan, "update_issue_body", lambda *a, **k: None)
+        monkeypatch.setattr(scan.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(scan.httpx, "Client", _FakeClient)
+
+        monkeypatch.setenv("GITHUB_TOKEN", "x")
+        monkeypatch.setenv("REPO", "rolliq-com/solution-template")
+        monkeypatch.setenv("RUN_URL", "https://github.com/rolliq-com/solution-template/actions/runs/1")
+        # The path is configured, exactly as the workflow always configures it, but the
+        # upload never produced the file.
+        missing = tmp_path / "never-uploaded.json"
+        assert not missing.exists()
+        monkeypatch.setenv(env_var, str(missing))
+
+        scan.run_create_issues()
+        return closed
+
+    return _run
+
+
+def test_a_failed_scanner_does_not_close_its_own_open_issues(reconcile_without_artifact):
+    """The defect: Semgrep's job fails, its artifact is absent, and the run closes every
+    open Semgrep issue as "resolved" — reporting a fix that never happened."""
+    closed = reconcile_without_artifact(
+        [_issue(51, RESOLVED_SCANNER, ["security", "severity:high", "source:semgrep"])],
+        "SEMGREP_FINDINGS",
+    )
+    assert closed == [], (
+        "the scan closed a Semgrep issue on a run where Semgrep produced no artifact — "
+        "'did not run' is being reported as 'resolved'"
+    )
+
+
+def test_a_failed_scanner_does_not_suppress_a_different_scanners_close(
+    reconcile, reconcile_without_artifact
+):
+    """The guard must be per-source, not a blanket disarm. Semgrep reporting cleanly still
+    closes its own resolved issue (via the normal fixture, which does write the artifact),
+    while a Gitleaks issue is protected on a run where Gitleaks produced nothing."""
+    assert reconcile(
+        [_issue(52, RESOLVED_SCANNER, ["security", "severity:high", "source:semgrep"])], []
+    ) == [52], "a reporting scanner must still auto-close its own resolved findings"
+
+    gitleaks_title = scan.aggregate_title("gitleaks")
+    assert reconcile_without_artifact(
+        [_issue(53, gitleaks_title, ["security", "severity:low", "source:gitleaks"])],
+        "GITLEAKS_FINDINGS",
+    ) == []
