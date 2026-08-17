@@ -1248,14 +1248,18 @@ def run_create_issues() -> None:
     # the artifact was written by an earlier ai-review job after parse_ai_findings,
     # but a compromised or tampered upload could otherwise inject unsanitised
     # strings straight into GitHub issue bodies via build_issue_title / build_finding_body.
-    for env_var, parser in [
-        ("AI_APP_FINDINGS",      lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
-        ("AI_INFRA_FINDINGS",    lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
-        ("AI_CICD_FINDINGS",     lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
-        ("SEMGREP_FINDINGS",     parse_semgrep_findings),
-        ("TRIVY_FS_FINDINGS",    parse_trivy_findings),
-        ("TRIVY_IMAGE_FINDINGS", parse_trivy_findings),
-        ("GITLEAKS_FINDINGS",    parse_gitleaks_findings),
+    reported_sources: set[str] = set()
+    for env_var, source, parser in [
+        ("AI_APP_FINDINGS",      "adversarial-ai",
+         lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
+        ("AI_INFRA_FINDINGS",    "adversarial-ai",
+         lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
+        ("AI_CICD_FINDINGS",     "adversarial-ai",
+         lambda p: _load_ai_findings_artifact(p, "adversarial-ai")),
+        ("SEMGREP_FINDINGS",     "semgrep",  parse_semgrep_findings),
+        ("TRIVY_FS_FINDINGS",    "trivy",    parse_trivy_findings),
+        ("TRIVY_IMAGE_FINDINGS", "trivy",    parse_trivy_findings),
+        ("GITLEAKS_FINDINGS",    "gitleaks", parse_gitleaks_findings),
     ]:
         path = os.environ.get(env_var, "")
         if path:
@@ -1263,10 +1267,28 @@ def run_create_issues() -> None:
                 batch = parser(path)
                 print(f"  {env_var}: {len(batch)} finding(s)")
                 all_findings.extend(batch)
+                # Whether this scanner ACTUALLY REPORTED, which is a different fact from
+                # whether it found anything. Every parser returns [] for a missing file, so
+                # a scanner job that failed (its artifact upload is `continue-on-error`) is
+                # indistinguishable downstream from one that ran and found nothing clean.
+                # The auto-close pass reasons by absence, so without this distinction a
+                # failed Semgrep job closes every open Semgrep issue as "resolved" —
+                # reporting a fix that never happened. Recorded as a CRITICAL fail-open in
+                # reviews/2026-08-16-tier1-adversarial-review-815.md.
+                if Path(path).exists():
+                    reported_sources.add(source)
             except Exception as exc:
                 print(f"  Warning: failed to load {env_var}: {exc}", file=sys.stderr)
 
     print(f"Total findings loaded: {len(all_findings)}")
+    # One source can be fed by several artifacts (trivy: fs + image). Requiring every one
+    # would mark trivy unreported whenever image scanning is legitimately not applicable,
+    # permanently disabling its auto-close — a guard that always fires teaches people to
+    # ignore it. One artifact present is taken as "the scanner ran".
+    unreported = {"semgrep", "trivy", "gitleaks"} - reported_sources
+    if unreported:
+        print(f"Scanners that did not report this run (their issues will NOT be auto-closed): "
+              f"{', '.join(sorted(unreported))}")
 
     # ── Apply suppressions to AI findings ──────────────────────────────────────
     suppressions = _load_suppressions()
@@ -1356,6 +1378,16 @@ def run_create_issues() -> None:
                 # the AI review) would close every capture-on-merge issue.
                 continue
             if title == SECURITY_STATUS_TITLE:
+                continue
+            stale_source = next(
+                (s for s in unreported if f"source:{s}" in label_names), None)
+            if stale_source is not None:
+                # This scanner produced no artifact this run, so `expected_titles` holds
+                # nothing from it and EVERY one of its issues would look resolved. Absence
+                # is only evidence when the scanner actually reported — same rule as the
+                # hand-filed skip above, applied to a scanner that did not run.
+                print(f"  Skipping (scanner '{stale_source}' did not report this run): "
+                      f"{title[:80]}")
                 continue
             if title not in expected_titles:
                 print(f"  Closing resolved: {title[:80]}")
