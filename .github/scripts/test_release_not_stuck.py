@@ -144,3 +144,70 @@ def test_the_incident_would_not_have_fired_on_its_first_night():
     early = datetime(2026, 8, 6, 8, 0, 0, tzinfo=timezone.utc)
     runs = [{"id": 31058866599, "status": "waiting", "created_at": "2026-08-06T00:11:04Z"}]
     assert check.evaluate(runs, early)[0] == []
+
+
+# ── the diagnosis must not be withheld by the alarm threshold ─────────────────
+# This check is bolted to the tag-staleness check as its EXPLANATION (the workflow
+# step's own `if: always()` comment says so). But the threshold used to gate reporting
+# as well as failing, so on 2026-08-16 19:34 it printed a green "nothing held longer
+# than 24h" in the very run that failed on tag staleness — while the ~15h held run
+# sitting right there was the entire reason. A nightly heartbeat can never see 24h on
+# the night a run is first held, so the explanation was structurally unreachable.
+
+
+def _notices(messages):
+    return [m for m in messages if m.startswith("::notice::")]
+
+
+def test_a_held_run_below_the_threshold_is_still_named():
+    """The regression. Not an error — but it must not be silent either."""
+    stuck, messages = check.evaluate([_run(9, "waiting", 15)], NOW)
+    assert stuck == [], "15h is under the alarm threshold and must not fail the check"
+    assert not _errors(messages)
+    notices = _notices(messages)
+    assert notices, (
+        "a run held 15h was not mentioned at all — this is the state the check was in "
+        "when it reported green against a tag-staleness failure it could have explained"
+    )
+    assert "9" in notices[0] and "15h" in notices[0]
+
+
+def test_the_below_threshold_notice_names_the_tag_staleness_connection():
+    """It has to be readable AS the explanation by someone looking at the failing step
+    above it, not just a stray line about a run id."""
+    _, messages = check.evaluate([_run(10, "waiting", 15)], NOW)
+    text = " ".join(_notices(messages))
+    assert "THIS IS WHY" in text and "moves no tags" in text
+
+
+def test_the_green_line_no_longer_claims_health_while_a_run_is_held():
+    """The exact sentence that misled: a summary saying nothing exceeded the threshold,
+    with no hint that something IS held."""
+    _, messages = check.evaluate([_run(11, "waiting", 15)], NOW)
+    summary = messages[-1]
+    assert "IS held" in summary, summary
+    assert not summary.endswith("✅"), "a run is held; this must not read as a clean pass"
+
+
+def test_a_genuinely_clear_list_still_reads_clean():
+    """Behaviour-preservation control: the healthy case must stay unambiguous, or the
+    change just trades one misleading line for another."""
+    _, messages = check.evaluate([_run(12, "completed", 5)], NOW)
+    assert not _notices(messages) and not _errors(messages)
+    assert messages[-1].endswith("✅")
+
+
+def test_two_held_runs_warn_that_the_oldest_holds_the_slot():
+    """Approving the right run is not sufficient — measured 2026-08-17. The stale run
+    had to be REJECTED first, and approving it would have released the older tree while
+    reporting success. Nothing else in the tooling says this."""
+    _, messages = check.evaluate([_run(13, "waiting", 15), _run(14, "queued", 2)], NOW)
+    text = " ".join(_notices(messages))
+    assert "OLDEST holds the slot" in text
+    assert "Reject" in text
+
+
+def test_one_held_run_does_not_emit_the_concurrency_warning():
+    """It only applies when runs are actually contending; otherwise it is noise."""
+    _, messages = check.evaluate([_run(15, "waiting", 15)], NOW)
+    assert "OLDEST holds the slot" not in " ".join(_notices(messages))
