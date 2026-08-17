@@ -285,6 +285,63 @@ def _resolve_canonical_path(action_path: str) -> Path | None:
     return canonical
 
 
+def _is_pattern_valid(pattern: str, field: str, entry_id: str) -> bool:
+    """Return True only if pattern is present, compilable, and not trivially broad.
+
+    Mirrors `adversarial-review.py`'s check of the same name. Without this floor, an
+    entry with a missing/empty field falls through `is_suppressed()`'s own `if not
+    file_pat or not find_pat: continue` guard as intended, but an entry with a
+    present-but-trivially-broad pattern (e.g. `.*`) does not — `re.search` on it
+    matches everything. That is the exact "absent/trivial predicate matches
+    everything" failure class that dropped three HIGH legal findings (one plaintext
+    PII) for 13 days in a sibling suppression matcher (infra-commons/legal#18). This
+    path (capture.py) has no CRITICAL exemption the way adversarial-review.py's
+    PR-time gate does, so an over-broad entry here can suppress a genuine CRITICAL
+    from ever being filed — the floor matters more here, not less.
+    """
+    if not pattern or len(pattern) < 3:
+        print(
+            f"Warning: suppression '{entry_id}' has missing/too-short {field} — skipped",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        compiled = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        print(
+            f"Warning: suppression '{entry_id}' has invalid {field} regex ({exc}) — skipped",
+            file=sys.stderr,
+        )
+        return False
+    if compiled.search("") is not None:
+        print(
+            f"Warning: suppression '{entry_id}' has overly broad {field} "
+            f"(matches empty string, e.g. '.*') — skipped",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _validate_suppressions(raw: list[dict]) -> list[dict]:
+    """Drop any entry whose file_pattern or finding_pattern can't do its job.
+
+    Applied to the merged (canonical + repo-local) set so neither source can bypass
+    it by itself. category_pattern is exempt: it's optional and only narrows a
+    match (see the canonical file's header), so an absent or broad category_pattern
+    cannot itself cause an over-match the way file_pattern/finding_pattern can.
+    """
+    validated = []
+    for entry in raw:
+        eid = entry.get("id", "unknown")
+        fp = str(entry.get("file_pattern", "")).strip()
+        pp = str(entry.get("finding_pattern", "")).strip()
+        if (_is_pattern_valid(fp, "file_pattern", eid)
+                and _is_pattern_valid(pp, "finding_pattern", eid)):
+            validated.append({**entry, "file_pattern": fp, "finding_pattern": pp})
+    return validated
+
+
 def load_suppressions(before_sha: str) -> list[dict]:
     """Load and merge canonical platform suppressions with repo-local ones.
 
@@ -312,6 +369,10 @@ def load_suppressions(before_sha: str) -> list[dict]:
     - **Canonical** when running in a downstream repo is read from
       platform-iac's working tree at the pinned composite-action SHA —
       immutable from the calling repo's POV.
+
+    The merged set is passed through `_validate_suppressions()` before it's returned,
+    so a missing, invalid, or trivially-broad `file_pattern`/`finding_pattern` in
+    either source is dropped with a warning rather than silently matching everything.
     """
     github_repo = os.environ.get("GITHUB_REPOSITORY", "")
     input_repo = os.environ.get("REPO", "")
@@ -365,7 +426,7 @@ def load_suppressions(before_sha: str) -> list[dict]:
                     file=sys.stderr,
                 )
             by_id[eid] = entry
-    return list(by_id.values())
+    return _validate_suppressions(list(by_id.values()))
 
 
 def build_suppression_context(suppressions: list[dict]) -> str:

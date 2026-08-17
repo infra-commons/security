@@ -385,3 +385,67 @@ def test_category_pattern_is_a_no_op_for_every_live_entry():
         "an entry now sets category_pattern — add a dedicated test for it and update/drop this "
         "one rather than deleting the coverage"
     )
+
+
+# ── _validate_suppressions: the over-broad-pattern floor ──────────────────────────────────────
+# `is_suppressed`'s own `if not file_pat or not find_pat: continue` only catches an *absent*
+# predicate. A *present-but-trivially-broad* one (e.g. `.*`) sails through it and then matches
+# every finding via `re.search`. This is the exact "absent/trivial predicate matches everything"
+# shape that dropped three HIGH legal findings — one plaintext PII — for 13 days in a sibling
+# suppression matcher (infra-commons/legal#18). capture.py has no CRITICAL exemption the way
+# adversarial-review.py's PR-time gate does, so it needs this floor more, not less. These tests
+# carry an actual over-broad entry through the real `is_suppressed` matcher as the canary, not
+# just through `_validate_suppressions` in isolation — "test the incident, not the fix".
+
+A_REAL_FINDING = {
+    "location": "src/api/webhook.py:42",
+    "title": "Unrelated CRITICAL: hardcoded credential committed in plaintext",
+    "description": "A database password appears in plaintext in this file.",
+    "category": "secrets",
+}
+
+
+def test_wildcard_finding_pattern_is_rejected_not_treated_as_a_match():
+    """The PII-drop shape: finding_pattern: '.*' must be dropped at load, not honoured at match."""
+    entry = {
+        "id": "synthetic-overbroad",
+        "file_pattern": r"src/.*\.py(:\d+(-\d+)?)?$",
+        "finding_pattern": ".*",
+        "reason": "synthetic",
+    }
+    validated = capture._validate_suppressions([entry])
+    assert validated == [], (
+        "an entry with finding_pattern='.*' survived _validate_suppressions — it would suppress "
+        "every finding in every matching file, including a genuine CRITICAL, fleet-wide"
+    )
+    # Prove the un-filtered entry really would have caught it, so the assertion above is
+    # meaningful rather than vacuous (the foil half of the check).
+    hit, _ = capture.is_suppressed(A_REAL_FINDING, [entry])
+    assert hit, "the synthetic entry does not even reproduce the over-match — fix the fixture"
+
+
+def test_wildcard_file_pattern_is_rejected_not_treated_as_a_match():
+    """Same shape, the other predicate: file_pattern='.*' must be dropped at load."""
+    entry = {
+        "id": "synthetic-overbroad-file",
+        "file_pattern": ".*",
+        "finding_pattern": "hardcoded credential",
+        "reason": "synthetic",
+    }
+    validated = capture._validate_suppressions([entry])
+    assert validated == [], (
+        "an entry with file_pattern='.*' survived _validate_suppressions — it would match every "
+        "location capture.py ever emits a finding_pattern hit for"
+    )
+
+
+def test_missing_predicate_is_still_rejected():
+    """The original (already-covered-by-is_suppressed) shape, kept as a floor regression too."""
+    entry = {"id": "synthetic-missing", "file_pattern": "", "finding_pattern": "credential"}
+    assert capture._validate_suppressions([entry]) == []
+
+
+def test_a_well_scoped_entry_survives_validation():
+    """The floor must not reject legitimate narrow entries — proven against a real canonical one."""
+    real_entry = next(e for e in ENTRIES if e["id"] == "sha-pin-first-party-workflows")
+    assert capture._validate_suppressions([real_entry]) == [real_entry]
