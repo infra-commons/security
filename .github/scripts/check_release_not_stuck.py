@@ -53,6 +53,21 @@ _HELD_STATUSES = frozenset({"waiting", "queued", "pending", "action_required", "
 # A release that nobody has approved overnight is ordinary — the reviewer is
 # asleep. A day later it is not, and by then a composite fix merged behind it
 # has been unreleased for a day with every symptom reading as shipped.
+#
+# The threshold governs FAILING, and deliberately nothing else. It used to gate
+# reporting too, which made this check structurally unable to do the job the
+# workflow step attaches it to. This runs on a nightly heartbeat, so a run held
+# since the previous morning is ~15h old — under 24h. On 2026-08-16 19:34 it
+# printed `No run has been held longer than 24h ✅` in the very run that failed
+# on tag staleness, while the ~15h held run sitting right there was the whole
+# explanation. A diagnostic whose silence threshold outlives its own cadence can
+# never explain the failure it is bolted to.
+#
+# The fix is NOT to lower this number. An ordinary overnight wait would then fail
+# the heartbeat on most nights, and a guard that fires on the healthy case trains
+# the override reflex just as effectively as one that is absent — a failure mode
+# this fleet has already recorded. Held runs are now always NAMED, at any age;
+# only crossing this threshold turns the check red.
 DEFAULT_THRESHOLD_HOURS = 24
 
 
@@ -85,12 +100,24 @@ def evaluate(runs, now: datetime, threshold_hours: float = DEFAULT_THRESHOLD_HOU
         return [], messages
 
     stuck = []
+    held_below = []
     for run in runs:
         if run.get("status") not in _HELD_STATUSES:
             continue
         created = _parse_ts(run["created_at"])
         held_hours = (now - created).total_seconds() / 3600
         if held_hours < threshold_hours:
+            # Named, not skipped. Below the threshold this is not yet an alarm, but it IS
+            # the answer to "why are the tags stale?" — and that question is being asked in
+            # this very run, by the step above.
+            held_below.append(run)
+            messages.append(
+                f"::notice::Release run {run['id']} is `{run['status']}`, held "
+                f"{held_hours:.0f}h (since {run['created_at']}) — under the "
+                f"{threshold_hours:.0f}h alarm threshold, so this is not yet a failure. "
+                f"If a tag-staleness check failed in this run, THIS IS WHY: a held "
+                f"release moves no tags. {run.get('html_url', '(no url)')}"
+            )
             continue
         stuck.append(run)
         messages.append(
@@ -101,10 +128,27 @@ def evaluate(runs, now: datetime, threshold_hours: float = DEFAULT_THRESHOLD_HOU
             f"{run.get('html_url', '(no url)')}"
         )
 
-    if not stuck:
+    if len(stuck) + len(held_below) > 1:
+        # Approving the right run is not sufficient when an older one holds the
+        # concurrency slot: the stale run must be REJECTED first, and approving it
+        # instead releases the older tree while reporting success. Nothing on the PR
+        # page or in the run list makes this legible. Measured 2026-08-17.
         messages.append(
-            f"No `{WORKFLOW_FILE}` run has been held longer than {threshold_hours:.0f}h "
-            f"({len(runs)} run(s) checked). ✅"
+            f"::notice::{len(stuck) + len(held_below)} release runs are held at once. "
+            f"They share one concurrency group, so the OLDEST holds the slot and the "
+            f"others cannot proceed until it is resolved. Reject the stale ones rather "
+            f"than approving them — approving an old run releases the tree it was pinned "
+            f"to, not current `main`, and reports success either way."
+        )
+
+    if not stuck and not held_below:
+        messages.append(
+            f"No `{WORKFLOW_FILE}` run is held at all ({len(runs)} run(s) checked). ✅"
+        )
+    elif not stuck:
+        messages.append(
+            f"No `{WORKFLOW_FILE}` run has been held longer than {threshold_hours:.0f}h, "
+            f"but {len(held_below)} IS held and named above ({len(runs)} run(s) checked)."
         )
     return stuck, messages
 

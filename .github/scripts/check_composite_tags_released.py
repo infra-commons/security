@@ -256,6 +256,28 @@ def evaluate(pins: dict[str, str], head_trees: dict, tag_trees: dict):
     return stale, errors
 
 
+def dispatch_cannot_release_notice(event_name: str) -> str | None:
+    """The annotation to add when this failure was reached by a manual dispatch.
+
+    `release-composites.yml` gates `release` on `if: github.event_name == 'workflow_run'`
+    and `verify` on `if: github.event_name != 'workflow_run'`, so a `workflow_dispatch`
+    runs the heartbeat ALONE and can never move a tag. The affordance reads like a release
+    button, and its exit 1 reads like a failed release; it actually means "the tags are
+    still stale". That misreading has already cost a run — someone re-dispatched expecting
+    a release and got the same report. Returns None for every other trigger, so the normal
+    failure text is unchanged.
+    """
+    if event_name != "workflow_dispatch":
+        return None
+    return (
+        "::notice::This run was started by `workflow_dispatch`, which CANNOT release: the "
+        "`release` job only runs on `workflow_run`. The failure above means the tags are "
+        "still stale, NOT that a release attempt failed. To actually release, approve the "
+        "pending `release-composites` run on the `fleet-release` environment (or push to "
+        "`main` to create one) — re-dispatching this workflow only repeats this report."
+    )
+
+
 def main() -> int:
     root = Path(
         os.environ.get("GITHUB_WORKSPACE")
@@ -302,6 +324,9 @@ def main() -> int:
             f"\n{len(stale)} unreleased composite(s), {len(errors)} error(s). "
             f"Moving the tag is the release; merging is not."
         )
+        notice = dispatch_cannot_release_notice(os.environ.get("GITHUB_EVENT_NAME", ""))
+        if notice:
+            print(notice)
         return 1
 
     print(f"All {len(pins)} composite moving tag(s) match the code on this branch. ✅")

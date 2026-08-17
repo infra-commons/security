@@ -372,3 +372,25 @@ def test_the_releaser_actually_releases_a_reusable_only_family(tmp_path, monkeyp
     assert "releasing depbot/v1.0.0" in out, (
         f"a reusable-only change did not trigger a release:\n{out}"
     )
+
+
+# ── a manual dispatch can never release, and its exit 1 says otherwise ─────────
+# `release` is gated `if: github.event_name == 'workflow_run'` and `verify` on the
+# negation, so a `workflow_dispatch` runs the heartbeat alone. The button reads like a
+# release button and its failure reads like a failed release; it actually means the tags
+# are still stale. That misreading already cost a run.
+
+
+def test_a_manual_dispatch_failure_says_it_could_not_have_released():
+    notice = check.dispatch_cannot_release_notice("workflow_dispatch")
+    assert notice and notice.startswith("::notice::")
+    assert "CANNOT release" in notice
+    # It must also say what to do instead, or it just relabels the dead end.
+    assert "fleet-release" in notice
+
+
+def test_the_notice_does_not_fire_on_the_triggers_that_can_release():
+    """Behaviour-preservation control: the normal failure text must be unchanged for a
+    real release path, or every scheduled run grows a misleading annotation."""
+    for event in ("workflow_run", "schedule", "push", ""):
+        assert check.dispatch_cannot_release_notice(event) is None, event
