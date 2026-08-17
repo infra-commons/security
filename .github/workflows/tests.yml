@@ -32,7 +32,11 @@ jobs:
         # Mirrors the versions the composite action itself installs, so the
         # tests exercise the same SDK surface that runs in production.
         # `hypothesis` is test-only — the action itself does not import it.
-        run: pip install pytest==8.3.4 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2 hypothesis==6.161.8
+        # `anthropic` was missing here even though the action installs it —
+        # call_anthropic() only imports it lazily inside the function, so no
+        # test exercised that path until security#815 added direct coverage
+        # for its truncation guard.
+        run: pip install pytest==8.3.4 anthropic==0.49.0 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2 hypothesis==6.161.8
 
       - name: Run tests
         # The `ci` hypothesis profile is derandomised (see conftest.py): a
@@ -100,8 +104,11 @@ jobs:
 
       - name: Install dependencies
         # Mirrors the versions the composite action itself installs, so the tests import the
-        # same capture.py against the same SDK surface that runs in production.
-        run: pip install pytest==8.3.4 httpx==0.28.1 pyyaml==6.0.2
+        # same capture.py against the same SDK surface that runs in production. `anthropic`
+        # was missing here even though the action installs it — review_diff() only imports
+        # it lazily inside the function, so no test exercised that path until security#815
+        # added direct coverage for its truncation guard.
+        run: pip install pytest==8.3.4 anthropic==0.49.0 httpx==0.28.1 pyyaml==6.0.2
 
       - name: Run tests
         # These probe the canonical suppressions against `git ls-files`, so the job needs a real
