@@ -27,8 +27,18 @@ name: Weekly security scan (reusable)
 #         secrets_repo: org/secrets-repo      # private config/PII repo for Gitleaks + AI review
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-#         PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
-#         CLIENTS_CONFIG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+#         # Either works independently; the App pair is preferred — a PAT expires
+#         # silently, an App-minted token cannot. Omit either pair entirely if you
+#         # don't set the corresponding repo input above. The App must actually be
+#         # installed (Contents:read) on whichever org owns *your* infra_repo /
+#         # secrets_repo — these are per-caller inputs, not a fixed shared repo, so
+#         # no pre-existing installation covers you automatically.
+#         PLATFORM_IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}                 # legacy
+#         PLATFORM_IAC_APP_ID: ${{ secrets.PLATFORM_IAC_APP_ID }}
+#         PLATFORM_IAC_PRIVATE_KEY: ${{ secrets.PLATFORM_IAC_PRIVATE_KEY }}
+#         CLIENTS_CONFIG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}             # legacy
+#         CLIENTS_CONFIG_APP_ID: ${{ secrets.CLIENTS_CONFIG_APP_ID }}
+#         CLIENTS_CONFIG_PRIVATE_KEY: ${{ secrets.CLIENTS_CONFIG_PRIVATE_KEY }}
 #
 # The caller workflow must grant:
 #   permissions:
@@ -70,12 +80,51 @@ on:
         required: false
         default: ""
     secrets:
+      # infra_repo and secrets_repo each have two ways to authenticate their
+      # checkout, and the corresponding cred-selection step fails closed unless
+      # exactly one is satisfied — but ONLY when that repo input is actually set.
+      # Both repos are optional; skip a repo entirely and neither its PAT nor its
+      # App pair need be provided.
       ANTHROPIC_API_KEY:
         required: false   # not needed unless run_ai_review is true
       PLATFORM_IAC_TOKEN:
-        required: false   # not needed unless infra_repo is set
+        description: >-
+          PAT with Contents:read on the infra repo. Legacy path. Prefer the App
+          pair below: a stored token expires, and its expiry is invisible until
+          every caller's checkout goes red at once. Not needed unless infra_repo
+          is set.
+        required: false
+      PLATFORM_IAC_APP_ID:
+        description: >-
+          App ID of a GitHub App installed on infra_repo's org. Used with
+          PLATFORM_IAC_PRIVATE_KEY to mint a short-lived, repo-scoped token per
+          run, so there is no stored credential to expire. Not needed unless
+          infra_repo is set.
+        required: false
+      PLATFORM_IAC_PRIVATE_KEY:
+        description: >-
+          Private key matching PLATFORM_IAC_APP_ID. Not needed unless infra_repo
+          is set.
+        required: false
       CLIENTS_CONFIG_TOKEN:
-        required: false   # not needed unless secrets_repo is set
+        description: >-
+          PAT with Contents:read on the config repo. Legacy path. Prefer the App
+          pair below: a stored token expires, and its expiry is invisible until
+          every caller's checkout goes red at once. Not needed unless
+          secrets_repo is set.
+        required: false
+      CLIENTS_CONFIG_APP_ID:
+        description: >-
+          App ID of a GitHub App installed on secrets_repo's org. Used with
+          CLIENTS_CONFIG_PRIVATE_KEY to mint a short-lived, repo-scoped token per
+          run, so there is no stored credential to expire. Not needed unless
+          secrets_repo is set.
+        required: false
+      CLIENTS_CONFIG_PRIVATE_KEY:
+        description: >-
+          Private key matching CLIENTS_CONFIG_APP_ID. Not needed unless
+          secrets_repo is set.
+        required: false
 
 jobs:
   # ── 1a. Semgrep SAST ────────────────────────────────────────────────────────
@@ -210,24 +259,94 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    # `secrets` is not a context GitHub permits in a step-level `if:` (infra-commons/security#90
+    # / #108) — mapping to job-level env here is what makes the credential-mode branches below
+    # expressible at all. Do not inline these back into the steps.
+    env:
+      IAC_APP_ID: ${{ secrets.PLATFORM_IAC_APP_ID }}
+      IAC_PRIVATE_KEY: ${{ secrets.PLATFORM_IAC_PRIVATE_KEY }}
+      IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
+      CFG_APP_ID: ${{ secrets.CLIENTS_CONFIG_APP_ID }}
+      CFG_PRIVATE_KEY: ${{ secrets.CLIENTS_CONFIG_PRIVATE_KEY }}
+      CFG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Select the infra-repo credential (fail closed)
+        id: infra_cred
+        if: ${{ inputs.infra_repo != '' }}
+        env:
+          TARGET_REPO: ${{ inputs.infra_repo }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IAC_APP_ID" ] && [ -n "$IAC_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$IAC_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer PLATFORM_IAC_APP_ID + PLATFORM_IAC_PRIVATE_KEY."
+          else
+            echo "::error::infra_repo is set but no infra credential is available: set PLATFORM_IAC_APP_ID AND PLATFORM_IAC_PRIVATE_KEY, or PLATFORM_IAC_TOKEN. Refusing to fail open." >&2
+            exit 1
+          fi
+          echo "owner=${TARGET_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint a repo-scoped infra-repo installation token
+        id: infra_token
+        if: steps.infra_cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.IAC_APP_ID }}
+          private-key: ${{ env.IAC_PRIVATE_KEY }}
+          owner: ${{ steps.infra_cred.outputs.owner }}
+          repositories: ${{ steps.infra_cred.outputs.repo }}
 
       - name: Check out infra repo
         if: ${{ inputs.infra_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.infra_repo }}
-          token: ${{ secrets.PLATFORM_IAC_TOKEN }}
+          token: ${{ steps.infra_token.outputs.token || secrets.PLATFORM_IAC_TOKEN }}
           path: _repos/infra
+
+      - name: Select the config-repo credential (fail closed)
+        id: cfg_cred
+        if: ${{ inputs.secrets_repo != '' }}
+        env:
+          TARGET_REPO: ${{ inputs.secrets_repo }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CFG_APP_ID" ] && [ -n "$CFG_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$CFG_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer CLIENTS_CONFIG_APP_ID + CLIENTS_CONFIG_PRIVATE_KEY."
+          else
+            echo "::error::secrets_repo is set but no config credential is available: set CLIENTS_CONFIG_APP_ID AND CLIENTS_CONFIG_PRIVATE_KEY, or CLIENTS_CONFIG_TOKEN. Refusing to fail open." >&2
+            exit 1
+          fi
+          echo "owner=${TARGET_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint a repo-scoped config-repo installation token
+        id: cfg_token
+        if: steps.cfg_cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.CFG_APP_ID }}
+          private-key: ${{ env.CFG_PRIVATE_KEY }}
+          owner: ${{ steps.cfg_cred.outputs.owner }}
+          repositories: ${{ steps.cfg_cred.outputs.repo }}
 
       - name: Check out config repo
         if: ${{ inputs.secrets_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.secrets_repo }}
-          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/secrets
 
       - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
@@ -255,24 +374,94 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    # `secrets` is not a context GitHub permits in a step-level `if:` (infra-commons/security#90
+    # / #108) — mapping to job-level env here is what makes the credential-mode branches below
+    # expressible at all. Do not inline these back into the steps.
+    env:
+      IAC_APP_ID: ${{ secrets.PLATFORM_IAC_APP_ID }}
+      IAC_PRIVATE_KEY: ${{ secrets.PLATFORM_IAC_PRIVATE_KEY }}
+      IAC_TOKEN: ${{ secrets.PLATFORM_IAC_TOKEN }}
+      CFG_APP_ID: ${{ secrets.CLIENTS_CONFIG_APP_ID }}
+      CFG_PRIVATE_KEY: ${{ secrets.CLIENTS_CONFIG_PRIVATE_KEY }}
+      CFG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Select the infra-repo credential (fail closed)
+        id: infra_cred
+        if: ${{ inputs.infra_repo != '' }}
+        env:
+          TARGET_REPO: ${{ inputs.infra_repo }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IAC_APP_ID" ] && [ -n "$IAC_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$IAC_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer PLATFORM_IAC_APP_ID + PLATFORM_IAC_PRIVATE_KEY."
+          else
+            echo "::error::infra_repo is set but no infra credential is available: set PLATFORM_IAC_APP_ID AND PLATFORM_IAC_PRIVATE_KEY, or PLATFORM_IAC_TOKEN. Refusing to fail open." >&2
+            exit 1
+          fi
+          echo "owner=${TARGET_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint a repo-scoped infra-repo installation token
+        id: infra_token
+        if: steps.infra_cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.IAC_APP_ID }}
+          private-key: ${{ env.IAC_PRIVATE_KEY }}
+          owner: ${{ steps.infra_cred.outputs.owner }}
+          repositories: ${{ steps.infra_cred.outputs.repo }}
 
       - name: Check out infra repo
         if: ${{ inputs.infra_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.infra_repo }}
-          token: ${{ secrets.PLATFORM_IAC_TOKEN }}
+          token: ${{ steps.infra_token.outputs.token || secrets.PLATFORM_IAC_TOKEN }}
           path: _repos/infra
+
+      - name: Select the config-repo credential (fail closed)
+        id: cfg_cred
+        if: ${{ inputs.secrets_repo != '' }}
+        env:
+          TARGET_REPO: ${{ inputs.secrets_repo }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CFG_APP_ID" ] && [ -n "$CFG_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$CFG_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer CLIENTS_CONFIG_APP_ID + CLIENTS_CONFIG_PRIVATE_KEY."
+          else
+            echo "::error::secrets_repo is set but no config credential is available: set CLIENTS_CONFIG_APP_ID AND CLIENTS_CONFIG_PRIVATE_KEY, or CLIENTS_CONFIG_TOKEN. Refusing to fail open." >&2
+            exit 1
+          fi
+          echo "owner=${TARGET_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint a repo-scoped config-repo installation token
+        id: cfg_token
+        if: steps.cfg_cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.CFG_APP_ID }}
+          private-key: ${{ env.CFG_PRIVATE_KEY }}
+          owner: ${{ steps.cfg_cred.outputs.owner }}
+          repositories: ${{ steps.cfg_cred.outputs.repo }}
 
       - name: Check out config repo
         if: ${{ inputs.secrets_repo != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.secrets_repo }}
-          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
           path: _repos/secrets
 
       - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
@@ -299,13 +488,49 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      CFG_APP_ID: ${{ secrets.CLIENTS_CONFIG_APP_ID }}
+      CFG_PRIVATE_KEY: ${{ secrets.CLIENTS_CONFIG_PRIVATE_KEY }}
+      CFG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
 
     steps:
+      - name: Select the config-repo credential (fail closed)
+        id: cfg_cred
+        # No `if:` here — the job-level `if: inputs.secrets_repo != ''` above already
+        # guarantees this only runs when a config repo was requested. (Deliberate
+        # asymmetry vs. the ai-review jobs, not an oversight.)
+        env:
+          TARGET_REPO: ${{ inputs.secrets_repo }}
+        run: |
+          set -euo pipefail
+          if [ -n "$CFG_APP_ID" ] && [ -n "$CFG_PRIVATE_KEY" ]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+            echo "Using a GitHub App installation token (minted per run)."
+          elif [ -n "$CFG_TOKEN" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+            echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer CLIENTS_CONFIG_APP_ID + CLIENTS_CONFIG_PRIVATE_KEY."
+          else
+            echo "::error::secrets_repo is set but no config credential is available: set CLIENTS_CONFIG_APP_ID AND CLIENTS_CONFIG_PRIVATE_KEY, or CLIENTS_CONFIG_TOKEN. Refusing to fail open." >&2
+            exit 1
+          fi
+          echo "owner=${TARGET_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO##*/}"  >> "$GITHUB_OUTPUT"
+
+      - name: Mint a repo-scoped config-repo installation token
+        id: cfg_token
+        if: steps.cfg_cred.outputs.mode == 'app'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ env.CFG_APP_ID }}
+          private-key: ${{ env.CFG_PRIVATE_KEY }}
+          owner: ${{ steps.cfg_cred.outputs.owner }}
+          repositories: ${{ steps.cfg_cred.outputs.repo }}
+
       - name: Check out config repo (full history)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.secrets_repo }}
-          token: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
+          token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
           fetch-depth: 0
           path: _repos/secrets
 
