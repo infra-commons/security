@@ -124,6 +124,14 @@ def resolve_severity_floor() -> str:
     An unset, empty, or unrecognised value falls back to LOW (report all) so a
     misconfiguration can never silently suppress findings — the fail-safe
     direction for a security control.
+
+    weekly-security-scan-reusable.yml's `trivy` job hand-rolls the same
+    normalise/validate/default-to-LOW mapping in bash, ahead of this action
+    even running, to pick trivy-action's `severity:` input from the same
+    `severity_floor` value (infra-commons/security#96). There is no shared
+    source of truth across that YAML/Python boundary — if the severity
+    vocabulary or the fail-safe default ever changes here, update that step
+    too, or Trivy silently drifts from what this function treats as the floor.
     """
     raw = os.environ.get("SEVERITY_FLOOR", "").strip().upper()
     if raw in SEVERITY_RANK:
@@ -1065,28 +1073,114 @@ def build_aggregate_body(source: str, findings: list[dict], run_url: str) -> str
     return "\n".join(lines)
 
 
+# Sentinel buckets for what build_status_body() cannot attribute. Neither can
+# ever collide with a real GitHub label suffix: `OTHER` is not in
+# ALLOWED_SEVERITIES, and a `source:` label can't produce a leading underscore.
+_OTHER_SEV = "OTHER"
+_OTHER_SRC = "_other"
+
+_SRC_DISPLAY = {
+    "adversarial-ai": "Adversarial AI",
+    "semgrep": "Semgrep SAST",
+    "trivy": "Trivy SCA/Container",
+    "gitleaks": "Gitleaks _(config repo secret scan)_",
+    "azure-defender": "Azure Defender _(Monday scan)_",
+    _OTHER_SRC: "Other / unattributed",
+}
+# Historical row order for the five known sources; anything discovered from a
+# live label that isn't one of them sorts after, alphabetically, with
+# _OTHER_SRC always last. Used by _source_sort_key() below.
+_KNOWN_SRC_ORDER = {s: i for i, s in enumerate(_SRC_DISPLAY) if s != _OTHER_SRC}
+
+
+def _display_source(src: str) -> str:
+    name = _SRC_DISPLAY.get(src, src.replace("-", " ").title())
+    # `src` can come straight from a live `source:*` label — anyone with
+    # label-write access on the repo controls its text. sanitize() is this
+    # file's existing discipline for exactly that (its `|` -> `&#124;` escape
+    # is commented "prevent Markdown table row injection" for this same
+    # table shape; see e.g. its use in build_finding_body()'s callers).
+    return sanitize(name, 60)
+
+
+def _source_sort_key(src: str) -> tuple[int, int | str]:
+    if src == _OTHER_SRC:
+        return (2, "")
+    if src in _KNOWN_SRC_ORDER:
+        return (0, _KNOWN_SRC_ORDER[src])
+    return (1, src)
+
+
 def build_status_body(
     repo: str,
     run_url: str,
     all_open: dict[str, dict],
+    truncated: bool = False,
 ) -> str:
-    counts: dict[str, dict[str, int]] = {}
-    sources = ["adversarial-ai", "semgrep", "trivy", "gitleaks", "azure-defender"]
-    sevs = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+    """Render the Security Status Dashboard body.
 
-    for src in sources:
-        counts[src] = {s: 0 for s in sevs}
+    `total_by_sev` (the headline severity table) and `counts` (the by-source
+    table) are each computed directly from `all_open` in one pass — neither is
+    derived from the other. That independence is the fix for
+    infra-commons/security#96: previously `total_by_sev` was a projection of
+    `counts` summed over a hardcoded five-source list, so any issue the source
+    table couldn't attribute (no `source:` label, a `source:` outside the five,
+    a non-canonical `severity:`, or a multi-label tie resolved by `next()` over
+    a `set`) silently vanished from *both* tables, biased toward under-count —
+    the unsafe direction for a security dashboard.
+
+    Every issue always lands in exactly one severity bucket (CRITICAL/HIGH/
+    MEDIUM/LOW, or `_OTHER_SEV` when no canonical `severity:` label resolves)
+    and exactly one source bucket (a real `source:` label, or `_OTHER_SRC`),
+    so nothing is dropped — an unattributable issue is visible in the OTHER
+    row and in the "N of M counted" line instead of disappearing.
+    """
+    sevs = sorted(ALLOWED_SEVERITIES, key=SEVERITY_RANK.get, reverse=True)  # CRITICAL..LOW
+    sev_cols = sevs + [_OTHER_SEV]
+
+    total_by_sev: dict[str, int] = {s: 0 for s in sev_cols}
+    # Pre-seed the five known sources (plus _OTHER_SRC) so a source that is
+    # currently reporting cleanly still gets its row — a scanner with zero
+    # open issues must read as "clean", not vanish the way a scanner that
+    # didn't run at all would. A source discovered from a live label that
+    # isn't one of the five (e.g. source:pentest) still gets a row via
+    # setdefault() below; it just wasn't known in advance.
+    counts: dict[str, dict[str, int]] = {src: {s: 0 for s in sev_cols} for src in _SRC_DISPLAY}
 
     for issue in all_open.values():
         label_names = {lbl["name"] for lbl in issue.get("labels", [])}
-        src = next((lbl.replace("source:", "") for lbl in label_names if lbl.startswith("source:")), None)
-        sev = next((lbl.replace("severity:", "").upper() for lbl in label_names if lbl.startswith("severity:")), None)
-        if src in counts and sev in sevs:
-            counts[src][sev] += 1
 
-    total_by_sev = {s: sum(counts[src][s] for src in sources) for s in sevs}
+        # Severity: deterministic and fail-safe in one pass — filter to
+        # ALLOWED_SEVERITIES (which excludes disposition labels sharing the
+        # same prefix, e.g. severity:accepted-for-release, with no separate
+        # ignore-list needed) and take the highest-ranked survivor, never a
+        # milder one. No canonical label at all -> _OTHER_SEV, not dropped.
+        sev_labels = (
+            lbl.replace("severity:", "").upper() for lbl in label_names if lbl.startswith("severity:")
+        )
+        sev = max((s for s in sev_labels if s in ALLOWED_SEVERITIES), key=SEVERITY_RANK.get, default=_OTHER_SEV)
 
-    sev_icons = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵"}
+        # Source: derived from whatever source:* labels are actually present,
+        # not a fixed vocabulary. Lower-cased so source:Trivy and source:trivy
+        # count as the same source rather than splitting into two rows —
+        # ensure_labels_exist() only ever seeds the lower-case form, but nothing
+        # stops a consumer applying a differently-cased one by hand. sorted()
+        # for deterministic multi-label resolution, same reasoning as severity.
+        src_labels = sorted(
+            lbl.replace("source:", "").lower() for lbl in label_names if lbl.startswith("source:")
+        )
+        src = src_labels[0] if src_labels else _OTHER_SRC
+
+        total_by_sev[sev] += 1
+        counts.setdefault(src, {s: 0 for s in sev_cols})[sev] += 1
+
+    total_open = len(all_open)
+    # Every issue lands in exactly one severity bucket by construction, so
+    # this is exact, not an estimate — see the docstring's invariant.
+    attributed = total_open - total_by_sev[_OTHER_SEV]
+    unattributed_source = sum(counts[_OTHER_SRC].values())
+
+    sev_icons = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🔵", _OTHER_SEV: "❔"}
 
     lines = [
         SECURITY_STATUS_MARKER,
@@ -1101,28 +1195,51 @@ def build_status_body(
         "|---|---|",
     ]
     for sev in sevs:
-        icon = sev_icons[sev]
-        lines.append(f"| {icon} {sev} | {total_by_sev[sev]} |")
+        lines.append(f"| {sev_icons[sev]} {sev} | {total_by_sev[sev]} |")
+    lines.append(f"| {sev_icons[_OTHER_SEV]} OTHER _(no recognised `severity:` label)_ | {total_by_sev[_OTHER_SEV]} |")
+
+    lines += [
+        "",
+        f"**{attributed} of {total_open} open security issues counted by severity.**",
+    ]
+    if attributed < total_open:
+        lines.append(
+            f"> ⚠️ **{total_open - attributed} issue(s) could not be matched to a recognised "
+            f"`severity:` label** and are counted in the OTHER row above instead of being "
+            f"dropped. Check their labels."
+        )
+    if unattributed_source:
+        lines.append(
+            f"> ⚠️ **{unattributed_source} issue(s) have no recognised `source:` label** and "
+            f"are counted in the \"Other / unattributed\" row of the table below instead of "
+            f"being dropped. Check their labels."
+        )
+    if truncated:
+        lines.append(
+            "> ⚠️ **The open-issue list hit the API page cap** — this dashboard reflects only "
+            "part of the repo's open security issues; the true total may be higher. See the "
+            "workflow run logs."
+        )
 
     lines += [
         "",
         "### Open findings by source",
         "",
-        "| Source | CRITICAL | HIGH | MEDIUM | LOW |",
-        "|---|---|---|---|---|",
     ]
-    src_display = {
-        "adversarial-ai": "Adversarial AI",
-        "semgrep": "Semgrep SAST",
-        "trivy": "Trivy SCA/Container",
-        "gitleaks": "Gitleaks _(config repo secret scan)_",
-        "azure-defender": "Azure Defender _(Monday scan)_",
-    }
-    for src in sources:
-        c = counts[src]
-        lines.append(f"| {src_display[src]} | {c['CRITICAL']} | {c['HIGH']} | {c['MEDIUM']} | {c['LOW']} |")
+    if not all_open:
+        lines.append("_No open `security`-labelled issues._")
+    else:
+        lines += [
+            "| Source | CRITICAL | HIGH | MEDIUM | LOW | OTHER |",
+            "|---|---|---|---|---|---|",
+        ]
+        for src in sorted(counts, key=_source_sort_key):
+            c = counts[src]
+            lines.append(
+                f"| {_display_source(src)} | {c['CRITICAL']} | {c['HIGH']} | {c['MEDIUM']} | "
+                f"{c['LOW']} | {c[_OTHER_SEV]} |"
+            )
 
-    encoded_repo = repo.replace("/", "%2F")
     base_url = f"https://github.com/{repo}/issues"
     lines += [
         "",
@@ -1438,7 +1555,7 @@ def run_create_issues() -> None:
 
     # ── Update Security Status dashboard ──────────────────────────────────────
     print("Updating Security Status dashboard …")
-    open_issues, _ = fetch_open_security_issues(token, repo)
+    open_issues, dashboard_truncated = fetch_open_security_issues(token, repo)
     # Exclude issues that were just closed this run — GitHub's API is eventually
     # consistent and may still return them as open for a brief period.
     if just_closed_numbers:
@@ -1447,7 +1564,7 @@ def run_create_issues() -> None:
 
     # Also fetch azure-defender issues (they're labelled security too if the
     # azure-secure-score workflow was updated; if not, they won't appear here)
-    status_body = build_status_body(repo, run_url, open_issues)
+    status_body = build_status_body(repo, run_url, open_issues, truncated=dashboard_truncated)
 
     # Find or create the dashboard issue (labelled security-status, not security)
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
@@ -1502,7 +1619,7 @@ def run_update_dashboard() -> None:
         )
 
     print("Refreshing Security Status dashboard …")
-    status_body = build_status_body(repo, run_url, open_issues)
+    status_body = build_status_body(repo, run_url, open_issues, truncated=truncated)
 
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         resp = client.get(
