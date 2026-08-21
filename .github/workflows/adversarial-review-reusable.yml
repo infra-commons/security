@@ -15,6 +15,26 @@ name: Adversarial review (reusable)
 # Resulting checks: `<caller-job-id> / claude`, `/ openai` (if enabled), `/ gate`.
 # Make `<caller-job-id> / gate` the required status check.
 #
+# ── What a caller's SHA pin on THIS file does, and does not, cover ───────────
+# The `claude`/`openai`/`gate` jobs below resolve their own composite actions —
+# `adversarial-review@adversarial-review/v1` and
+# `adversarial-review-gate@adversarial-review-gate/v1` — from moving `<family>/v1`
+# tags, not commit SHAs. A caller's SHA pin on THIS reusable file is real: it
+# fixes which version of the orchestration below runs. It does NOT extend to
+# either composite — those are re-resolved from whatever the moving tag points
+# to at run time, identically for every caller and every pin, including a pin
+# from years ago. This is deliberate (fleet-wide review/gate fixes ship on one
+# tag move, with no per-caller PR — see ADR 0008 in rolliq-com and
+# reviews/2026-08-17-composite-pin-posture-decision.md in this repo for the
+# full tradeoff), not an oversight, and it is not fixed by pinning harder on
+# the caller side. The moving tags' own integrity currently rests on this
+# repo's `protect-moving-tags` ruleset, which — unlike `protect-immutable-tags`
+# covering every `vX.Y.Z` release tag — only enforces `deletion`, not `update`;
+# see infra-commons/security#52 (open) for why, and infra-commons/security#95
+# for the fuller writeup of this exact gap. Immutable per-release tags do exist
+# (`adversarial-review/vX.Y.Z`, `adversarial-review-gate/vX.Y.Z`) but nothing in
+# this file lets a caller select one instead of the moving `v1` alias today.
+#
 # ── What enabling the second reviewer does, and does not, buy ────────────────
 # The gate result is three-state, not boolean (see the gate action's script):
 #
