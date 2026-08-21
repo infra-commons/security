@@ -401,6 +401,16 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
         }],
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
     )
+    usage = message.usage
+    print(
+        "usage: input={} output={} cache_read={} cache_write={}".format(
+            usage.input_tokens,
+            usage.output_tokens,
+            getattr(usage, "cache_read_input_tokens", 0),
+            getattr(usage, "cache_creation_input_tokens", 0),
+        ),
+        flush=True,
+    )
     content = message.content[0].text if message.content else ""
 
     # An empty or truncated completion must NOT read as "no findings": that is a
@@ -437,6 +447,16 @@ def call_openai(api_key: str, model: str, diff: str, context: str, system_prompt
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": _build_user_content(diff, context)},
         ],
+    )
+    usage = response.usage
+    details = getattr(usage, "completion_tokens_details", None)
+    print(
+        "usage: input={} output={} reasoning={}".format(
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            getattr(details, "reasoning_tokens", 0),
+        ),
+        flush=True,
     )
     choice = response.choices[0]
     content = choice.message.content

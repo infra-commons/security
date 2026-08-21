@@ -103,12 +103,14 @@ def test_configured_providers_have_explicit_scopes():
 
 # ── OpenAI completion guards ───────────────────────────────────────────────────
 
-def _fake_openai(monkeypatch, *, content, finish_reason="stop"):
+def _fake_openai(monkeypatch, *, content, finish_reason="stop", usage=None):
     """Install a fake OpenAI client returning a single chosen completion."""
     choice = SimpleNamespace(
         message=SimpleNamespace(content=content), finish_reason=finish_reason
     )
-    response = SimpleNamespace(choices=[choice])
+    if usage is None:
+        usage = SimpleNamespace(prompt_tokens=11, completion_tokens=22)
+    response = SimpleNamespace(choices=[choice], usage=usage)
 
     class _Completions:
         def create(self, **kwargs):
@@ -132,6 +134,25 @@ def test_openai_returns_content_on_success(monkeypatch):
     _fake_openai(monkeypatch, content="### CRITICAL\n- something")
     out = adv.call_openai("k", "m", "diff", "ctx", "sys")
     assert "CRITICAL" in out
+
+
+def test_openai_prints_usage_line(monkeypatch, capsys):
+    # Default fake usage has no completion_tokens_details at all — exercises the
+    # getattr(..., 0) default for models/API versions that don't return it.
+    _fake_openai(monkeypatch, content="ok")
+    adv.call_openai("k", "m", "diff", "ctx", "sys")
+    assert "usage: input=11 output=22 reasoning=0" in capsys.readouterr().out
+
+
+def test_openai_prints_reasoning_tokens_when_present(monkeypatch, capsys):
+    usage = SimpleNamespace(
+        prompt_tokens=5,
+        completion_tokens=9,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=7),
+    )
+    _fake_openai(monkeypatch, content="ok", usage=usage)
+    adv.call_openai("k", "m", "diff", "ctx", "sys")
+    assert "usage: input=5 output=9 reasoning=7" in capsys.readouterr().out
 
 
 def test_openai_uses_max_completion_tokens_not_max_tokens(monkeypatch):
@@ -181,9 +202,11 @@ def test_truncation_error_is_not_an_infra_error():
 # (call_openai already had it) but shipped no tests for it — these close that
 # gap so a regression on the Anthropic path is caught the same way.
 
-def _fake_anthropic(monkeypatch, *, content_blocks, stop_reason="end_turn"):
+def _fake_anthropic(monkeypatch, *, content_blocks, stop_reason="end_turn", usage=None):
     """Install a fake Anthropic client returning a single chosen message."""
-    message = SimpleNamespace(content=content_blocks, stop_reason=stop_reason)
+    if usage is None:
+        usage = SimpleNamespace(input_tokens=33, output_tokens=44)
+    message = SimpleNamespace(content=content_blocks, stop_reason=stop_reason, usage=usage)
 
     class _Messages:
         def create(self, **kwargs):
@@ -204,6 +227,26 @@ def test_anthropic_returns_content_on_success(monkeypatch):
     _fake_anthropic(monkeypatch, content_blocks=[SimpleNamespace(text="### CRITICAL\n- something")])
     out = adv.call_anthropic("k", "m", "diff", "ctx", "sys")
     assert "CRITICAL" in out
+
+
+def test_anthropic_prints_usage_line(monkeypatch, capsys):
+    # Default fake usage has no cache_read/cache_write fields at all — exercises
+    # the getattr(..., 0) default for a response with no cache activity.
+    _fake_anthropic(monkeypatch, content_blocks=[SimpleNamespace(text="ok")])
+    adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+    assert "usage: input=33 output=44 cache_read=0 cache_write=0" in capsys.readouterr().out
+
+
+def test_anthropic_prints_cache_tokens_when_present(monkeypatch, capsys):
+    usage = SimpleNamespace(
+        input_tokens=1,
+        output_tokens=2,
+        cache_read_input_tokens=3,
+        cache_creation_input_tokens=4,
+    )
+    _fake_anthropic(monkeypatch, content_blocks=[SimpleNamespace(text="ok")], usage=usage)
+    adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+    assert "usage: input=1 output=2 cache_read=3 cache_write=4" in capsys.readouterr().out
 
 
 def test_anthropic_empty_completion_raises_rather_than_reading_as_clean(monkeypatch):
