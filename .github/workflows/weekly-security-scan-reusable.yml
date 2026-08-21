@@ -175,12 +175,45 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Resolve Trivy severity list from severity_floor
+        # Trivy was previously hardwired to HIGH,CRITICAL regardless of
+        # severity_floor, so a caller that set (or defaulted to) LOW/MEDIUM
+        # was told "report everything" but never got a Trivy MEDIUM or LOW —
+        # those columns were structurally always 0 and read as clean when
+        # they were never measured (infra-commons/security#96). This
+        # deliberately duplicates resolve_severity_floor()'s normalise/
+        # validate/default-to-LOW mapping from security-scan.py — this job
+        # runs before that action does, in bash, so there's no shared source
+        # of truth across the boundary. If the severity vocabulary or the
+        # fail-safe default ever changes in one place, change it in the
+        # other too, or Trivy silently drifts from the rest of the pipeline.
+        id: sev
+        env:
+          FLOOR: ${{ inputs.severity_floor }}
+        run: |
+          set -euo pipefail
+          # tr -d strips whitespace (including a whitespace-only value) so it
+          # falls into the LOW/"" branch below rather than the warning one —
+          # matching resolve_severity_floor()'s .strip().upper() in Python.
+          floor="$(printf '%s' "$FLOOR" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+          case "$floor" in
+            CRITICAL) list=CRITICAL ;;
+            HIGH)     list=HIGH,CRITICAL ;;
+            MEDIUM)   list=MEDIUM,HIGH,CRITICAL ;;
+            LOW|"")   list=LOW,MEDIUM,HIGH,CRITICAL ;;
+            *)
+              echo "::warning::severity_floor='$FLOOR' is not one of CRITICAL|HIGH|MEDIUM|LOW; Trivy will report LOW+ (all severities)."
+              list=LOW,MEDIUM,HIGH,CRITICAL
+              ;;
+          esac
+          echo "trivy_severity=$list" >> "$GITHUB_OUTPUT"
+
       - name: Trivy — filesystem scan (JSON)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
-          severity: HIGH,CRITICAL
+          severity: ${{ steps.sev.outputs.trivy_severity }}
           exit-code: "0"
           format: json
           output: trivy-fs.json
@@ -203,7 +236,7 @@ jobs:
         with:
           scan-type: image
           image-ref: security-scan-target:latest
-          severity: HIGH,CRITICAL
+          severity: ${{ steps.sev.outputs.trivy_severity }}
           exit-code: "0"
           format: json
           output: trivy-image.json
