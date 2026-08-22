@@ -64,10 +64,10 @@ jobs:
     # removed the step that was being forgotten, but it also removed the last
     # deliberate act between an edit here and 13+ repos' merge gates: the moving
     # tags are consumed by production callers with no per-caller pin bump to
-    # review, and `protect-moving-tags` keeps only its `deletion` rule so nothing
-    # else stands in the way. Tests passing is a statement about this repo; it is
-    # not a decision to ship to the fleet. This environment makes someone take
-    # that decision, at the moment the fleet is actually reached.
+    # review, and `protect-moving-tags` restricts `update` to the App only.
+    # Tests passing is a statement about this repo; it is not a decision to
+    # ship to the fleet. This environment makes someone take that decision, at
+    # the moment the fleet is actually reached.
     #
     # It must exist with its `required_reviewers` rule BEFORE this line merges: a
     # workflow naming an environment that does not exist gets one auto-created
@@ -84,21 +84,63 @@ jobs:
     # that a human deliberately releases, not that a second person does.
     environment: fleet-release
     permissions:
-      # Moving a tag is a write, and this runs as GITHUB_TOKEN rather than as an
-      # App. That is a deliberate choice, not a shortcut: this repo is public, so
-      # it cannot read the org's private-visibility secrets, and putting an App
-      # key in a public repo's secret scope is the larger risk. GitHub Actions
-      # cannot be granted a ruleset bypass either ("Actor GitHub Actions
-      # integration must be part of the ruleset source or owner organization"),
-      # so `protect-moving-tags` instead keeps only its `deletion` rule and
-      # permits the move. `protect-immutable-tags` is untouched and has no bypass
-      # actor at all, so a released `<family>/vX.Y.Z` can never be moved or
-      # deleted by anyone: the integrity guarantee lives in the immutable tags,
-      # which is what the moving pointer is checked against.
-      contents: write
+      # Corrected 2026-08-22 (reviews/2026-08-22-protect-moving-tags-ruleset-revert.md):
+      # this job now mints and pushes as an App installation token, not
+      # GITHUB_TOKEN, so the workflow-level `contents: read` above is enough —
+      # the actual write authority lives in the minted token below, not here.
+      #
+      # Why this changed: `protect-moving-tags` (19945090) is meant to restrict
+      # `update`/`non_fast_forward` to the App only, matching
+      # infra-commons/legal's equivalent ruleset — but GitHub Actions itself
+      # cannot be granted a ruleset bypass ("Actor GitHub Actions integration
+      # must be part of the ruleset source or owner organization" — a real,
+      # live-tested platform limit, infra-commons/security#62). So as long as
+      # this job pushed as GITHUB_TOKEN, the ruleset had to keep `update`
+      # off, and a `GITHUB_TOKEN` push could force-move `*/v1` on this repo —
+      # the exposure infra-commons/security#122 named and fixed on the ruleset
+      # side, only for a `GITHUB_TOKEN` release to hit `GH013` on the very
+      # next run and get manually (and undocumentedly) reverted hours later.
+      #
+      # The App-token route this job now takes is not new: it's exactly what
+      # infra-commons/legal/.github/workflows/release-legal-review.yml has run
+      # successfully in production since 2026-08-15, on an equally public
+      # repo, under a ruleset that already restricts `update` to the App. The
+      # "this repo is public, so it cannot read the org's private-visibility
+      # secrets" reasoning that used to justify GITHUB_TOKEN here didn't hold:
+      # `infra-commons/legal` is also public, and `INFRA_COMMONS_BOT_PRIVATE_KEY`
+      # is an org secret with `visibility: selected` — a public repo can read
+      # a selected-visibility secret once explicitly added to that list; a
+      # repo's public/private status was never the actual constraint.
+      #
+      # This PR ships correctly wired and inert, same as legal's did: its
+      # first live run will fail cleanly at the token-mint step until the
+      # operator adds infra-commons/security to that secret's
+      # selected-repositories list (a deliberate, separate, operator-executed
+      # step — see the review doc's runbook). Do not "fix" a failing mint by
+      # reverting to GITHUB_TOKEN; the ruleset (once restored, same runbook)
+      # will not permit it.
+      contents: read
     steps:
+      - name: Mint an installation token as infra-commons-bot
+        # Scoped to exactly this repo and exactly the permission needed to
+        # push a tag — least privilege for a token this workflow logs the
+        # mint of. `client-id` is a public App identifier, not a secret;
+        # `private-key` is.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: Iv23liH9thgSIViTxbMV # gitleaks:allow
+          private-key: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+          owner: infra-commons
+          repositories: security
+          permission-contents: write
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          # Minted as the App so every git push below (tag create + moving-tag
+          # force-push) is authenticated as the App — the only identity the
+          # ruleset lets move `*/v1` once its `update` rule is restored.
+          token: ${{ steps.app-token.outputs.token }}
           # Tags and history are the input: the release compares the action
           # directory's tree at HEAD against its tree at the moving tag.
           fetch-depth: 0
