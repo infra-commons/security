@@ -77,12 +77,21 @@ pinned to a **per-family moving major tag** rather than a 40-char SHA:
 
 | Composite | Moving pin |
 |---|---|
-| `.github/actions/adversarial-review` | `@adversarial-review/v1` |
 | `.github/actions/auto-merge-churn` | `@auto-merge-churn/v1` |
 | `.github/actions/capture-findings` | `@capture-findings/v1` |
 | `.github/actions/daily-health-check` | `@daily-health-check/v1` |
 | `.github/actions/suppression-audit` | `@suppression-audit/v1` |
 | `.github/actions/weekly-security-scan` | `@weekly-security-scan/v1` |
+
+**Exception: `adversarial-review` and `adversarial-review-gate`.** These two used to be in
+this table too, until infra-commons/security#95: a caller's SHA pin on
+`adversarial-review-reusable.yml` only fixes the orchestration file if the composites it
+calls are *also* pinned, since the moving tag re-resolves identically for every caller and
+every pin, including one from years ago. Both `uses:` lines inside that reusable are now
+pinned to commit SHAs instead — see its own header comment for the full rationale and the
+manual bump procedure. `release-composites.yml` still cuts `adversarial-review/vX.Y.Z`
+immutable release tags (useful as the SHA source for the next bump) but no longer delivers
+either composite via a moving tag.
 
 `pin-check.yml` carries a narrow, deliberate exception for own-repo `.github/actions/*`
 refs on a `<family>/vN` tag (see `.github/scripts/check-action-pins.sh`); our own

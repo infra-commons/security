@@ -15,25 +15,39 @@ name: Adversarial review (reusable)
 # Resulting checks: `<caller-job-id> / claude`, `/ openai` (if enabled), `/ gate`.
 # Make `<caller-job-id> / gate` the required status check.
 #
-# ── What a caller's SHA pin on THIS file does, and does not, cover ───────────
-# The `claude`/`openai`/`gate` jobs below resolve their own composite actions —
-# `adversarial-review@adversarial-review/v1` and
-# `adversarial-review-gate@adversarial-review-gate/v1` — from moving `<family>/v1`
-# tags, not commit SHAs. A caller's SHA pin on THIS reusable file is real: it
-# fixes which version of the orchestration below runs. It does NOT extend to
-# either composite — those are re-resolved from whatever the moving tag points
-# to at run time, identically for every caller and every pin, including a pin
-# from years ago. This is deliberate (fleet-wide review/gate fixes ship on one
-# tag move, with no per-caller PR — see ADR 0008 in rolliq-com and
-# reviews/2026-08-17-composite-pin-posture-decision.md in this repo for the
-# full tradeoff), not an oversight, and it is not fixed by pinning harder on
-# the caller side. The moving tags' own integrity currently rests on this
-# repo's `protect-moving-tags` ruleset, which — unlike `protect-immutable-tags`
-# covering every `vX.Y.Z` release tag — only enforces `deletion`, not `update`;
-# see infra-commons/security#52 (open) for why, and infra-commons/security#95
-# for the fuller writeup of this exact gap. Immutable per-release tags do exist
-# (`adversarial-review/vX.Y.Z`, `adversarial-review-gate/vX.Y.Z`) but nothing in
-# this file lets a caller select one instead of the moving `v1` alias today.
+# ── What a caller's SHA pin on THIS file covers ───────────────────────────────
+# The `claude`/`openai`/`gate` jobs below call two composite actions —
+# `adversarial-review` and `adversarial-review-gate` — pinned below to commit
+# SHAs, the same way callers pin THIS file. A caller's SHA pin on this reusable
+# now genuinely covers the code that reviews the diff and the code that decides
+# whether it merges, not only the orchestration around them.
+#
+# This was NOT always true. Until infra-commons/security#95, both composites
+# were resolved from moving `<family>/v1` tags instead, so a caller's SHA pin
+# fixed only which version of THIS file ran — the two composites re-resolved
+# from whatever the moving tag pointed to at run time, identically for every
+# caller and every pin, including one from years ago. That shape was deliberate,
+# not an oversight (fleet-wide review/gate fixes shipping on one tag move, with
+# no per-caller PR — see ADR 0008 in rolliq-com), and the moving tags' integrity
+# rested on this repo's `protect-moving-tags` ruleset, which has flip-flopped
+# between deletion-only and a hardened update-restricted state more than once —
+# see infra-commons/security#52 for that history. #95's fix (this pin) is a
+# deliberate reversal of that tradeoff for this lineage specifically, made on
+# explicit operator sign-off; see reviews/2026-08-17-composite-pin-posture-decision.md
+# in this repo for the tradeoff being reversed.
+#
+# Bump these two SHAs deliberately, the same way callers bump their pin on this
+# file: cut (or confirm) the composite's own `<family>/vX.Y.Z` immutable release
+# tag, point the `uses:` line at that commit's SHA, and land it as an ordinary
+# reviewed PR to this repo. There is no more zero-PR fleet-wide propagation for
+# `adversarial-review`/`adversarial-review-gate` fixes — every fix now needs
+# this file bumped, same as every other change here, and every caller pinning
+# this file by SHA needs its own follow-up bump to actually receive it.
+# `release-composites.yml` still cuts `<family>/vX.Y.Z` immutable release tags
+# for `adversarial-review` (its moving tag is still tracked as a side effect of
+# this file being part of that family's surface, per #63) — that immutable tag
+# is the natural source for the SHA to bump to, even though nothing here
+# resolves the moving tag itself anymore.
 #
 # ── What enabling the second reviewer does, and does not, buy ────────────────
 # The gate result is three-state, not boolean (see the gate action's script):
@@ -66,9 +80,10 @@ name: Adversarial review (reusable)
 # The block requires that NO reviewer produced a verdict. If a second provider
 # reviewed the change, the change was reviewed and this does not fire.
 #
-# RELEASE ORDER: the gate job calls `adversarial-review-gate@adversarial-review-gate/v1`.
-# That tag must exist before any caller pins a SHA at or after this commit, or the
-# gate job fails to resolve the action and every PR in the caller blocks.
+# The old RELEASE ORDER hazard this section used to document — the gate tag
+# having to exist before a caller could safely pin a SHA at or after a given
+# commit — no longer applies: both composites are baked-in SHAs now, so there
+# is nothing left to resolve at run time and no ordering to get wrong.
 
 # Default all permissions to none — each job declares exactly what it needs.
 # This prevents future jobs added without explicit permissions from inheriting
@@ -108,7 +123,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@adversarial-review/v1
+        uses: infra-commons/security/.github/actions/adversarial-review@1f790ff9af9f82e3478ca1c9ce7cf53a993355eb # adversarial-review/v1.9.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -135,7 +150,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@adversarial-review/v1
+        uses: infra-commons/security/.github/actions/adversarial-review@1f790ff9af9f82e3478ca1c9ce7cf53a993355eb # adversarial-review/v1.9.0
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -207,7 +222,7 @@ jobs:
       # this gate's worst failure mode kept being discovered.
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@adversarial-review-gate/v1
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@01fff5eb59cb8773bc822bfd2ab1f82e44fb2485 # adversarial-review-gate/v1.3.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}

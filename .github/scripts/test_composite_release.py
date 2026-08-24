@@ -62,10 +62,16 @@ def test_ignores_commented_out_pins(tmp_path):
 
 def test_this_repo_still_has_pins_to_check():
     """The check's own input. If discovery silently returns nothing, the check
-    passes while measuring zero families, the failure it exists to catch."""
+    passes while measuring zero families, the failure it exists to catch.
+
+    Not `adversarial-review`: infra-commons/security#95 SHA-pinned that family's
+    (and adversarial-review-gate's) `uses:` line, so it deliberately no longer
+    shows up here — see check-action-pins.sh's matching carve-out. Any family
+    that still ships via a moving tag proves discovery still works.
+    """
     pins = check.discover_pins(REPO_ROOT)
     assert pins, "no own-composite moving-tag pins discovered in this repo"
-    assert "adversarial-review" in pins
+    assert "capture-findings" in pins
 
 
 # ── every released family is actually tested ──────────────────────────────────
