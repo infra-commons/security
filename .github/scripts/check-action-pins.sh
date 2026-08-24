@@ -9,11 +9,18 @@
 #
 # Allowed without a SHA: local `./` refs, digest-pinned `docker://...@sha256:` images, and
 # own-repo *composite-action* refs pinned to a per-family `<family>/vN...` moving tag
-# (e.g. `.github/actions/adversarial-review@adversarial-review/v1`) — the one deliberate,
-# scoped relaxation: each composite we own end-to-end ships fixes by moving its `<family>/v1`
+# (e.g. `.github/actions/capture-findings@capture-findings/v1`) — the one deliberate,
+# scoped relaxation: each of those composites ships fixes by moving its `<family>/v1`
 # tag (see README), so its internal pin is intentionally NOT a raw SHA. Note this exempts
 # only `.github/actions/*` refs; our own *reusable-workflow* calls still require a 40-char
 # SHA, as does every third-party and cross-repo `uses:`.
+#
+# `adversarial-review` and `adversarial-review-gate` are explicitly EXCLUDED from that
+# relaxation (infra-commons/security#95): they used to ship the same way, but a caller's
+# SHA pin on adversarial-review-reusable.yml only meant something once these two also
+# resolved to a fixed SHA instead of a moving tag. If either ever shows up again pinned
+# to a `<family>/vN` tag, that is a regression back to #95, not a legitimate use of this
+# exemption — so it fails loudly here instead of silently passing.
 # Runs in CI (pin-check.yml) and locally: `bash .github/scripts/check-action-pins.sh`.
 set -euo pipefail
 
@@ -24,6 +31,11 @@ while IFS= read -r raw; do
   ref="$(printf '%s' "$ref" | tr -d "\"'" | xargs)"    # trim quotes/whitespace
   case "$ref" in
     ./*|docker://*@sha256:*) continue ;;
+    infra-commons/security/.github/actions/adversarial-review@*/v[0-9]*|infra-commons/security/.github/actions/adversarial-review-gate@*/v[0-9]*)
+      echo "::error file=$file,line=$lineno::'$ref' pins by moving tag — adversarial-review and adversarial-review-gate must be SHA-pinned (infra-commons/security#95), not exempted like the other composites"
+      viol=$((viol + 1))
+      continue
+      ;;
     infra-commons/security/.github/actions/*@*/v[0-9]*) continue ;;
     *@*)
       tail="${ref##*@}"
