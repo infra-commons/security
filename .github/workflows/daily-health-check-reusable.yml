@@ -17,6 +17,14 @@ name: Daily health check (reusable)
 #     group: daily-health-check
 #     cancel-in-progress: false
 #
+#   permissions:
+#     contents:      write
+#     pull-requests: write
+#     actions:       write
+#     issues:        write
+#     checks:        read
+#     statuses:      read
+#
 #   jobs:
 #     health-check:
 #       uses: infra-commons/security/.github/workflows/daily-health-check-reusable.yml@<SHA>
@@ -37,6 +45,16 @@ name: Daily health check (reusable)
 #   pull-requests: write   (approve Dependabot PRs)
 #   actions:       write   (re-run failed workflows)
 #   issues:        write   (file / close health-check issues)
+#   checks:        read    (read PR check conclusions before approving)
+#   statuses:      read    (same, for legacy commit statuses)
+#
+# A caller that grants LESS than this does not fail — it silently degrades. A
+# reusable workflow's job token is capped by the caller's grant, so a caller
+# missing `checks: read` makes `gh pr view --json statusCheckRollup` fail inside
+# this workflow, every Dependabot PR skips as unreadable, and the run still
+# concludes `success`. If the daily digest reports `skipped_unreadable=N` for
+# every open Dependabot PR, check the run log's `GITHUB_TOKEN Permissions` group
+# before looking anywhere else.
 
 permissions: {}
 
@@ -82,6 +100,18 @@ jobs:
       pull-requests: write
       actions:       write
       issues:        write
+      # Both are READ-only and both are load-bearing: `triage_dependabot_prs`
+      # runs `gh pr view --json files,statusCheckRollup`, and that rollup is
+      # built from check-runs (`checks`) and legacy commit statuses
+      # (`statuses`). Without them the read fails outright, `_pr_files_and_checks`
+      # returns None, and EVERY Dependabot PR takes the fail-closed
+      # `skipped_unreadable` branch — which is exactly what happened fleet-wide
+      # from 2026-08-14 (#98 added the read; this block was last touched
+      # 2026-07-16) until infra-commons/meta#1060 measured it. The lane kept
+      # reporting `success` throughout, because skipping everything is a
+      # successful run.
+      checks:        read
+      statuses:      read
     # `secrets` context is NOT available in a step `if:` (it fails workflow
     # parsing with a startup_failure), but `env` IS — so hoist the presence
     # check here and gate the mint step on env below.
