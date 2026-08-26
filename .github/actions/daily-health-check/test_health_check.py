@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
 # The module filename contains a dash, so it cannot be imported by name.
 _MODULE_PATH = Path(__file__).parent / "health-check.py"
@@ -630,21 +631,115 @@ def test_touches_workflow_files_false_for_an_ordinary_dependency_bump():
 def test_pr_files_and_checks_returns_None_not_empty_when_gh_yields_nothing(monkeypatch):
     """A `gh` failure must be distinguishable from "no files, no checks" — an
     absent result reading as a pass is the #86 failure mode itself."""
-    monkeypatch.setattr(hc, "_gh", lambda *a, **k: "")
-    assert hc._pr_files_and_checks("o/r", 1) is None
+    monkeypatch.setattr(hc, "_gh_capture", lambda *a: (1, "", ""))
+    data, why = hc._pr_files_and_checks("o/r", 1)
+    assert data is None
+    assert why
 
 
 def test_pr_files_and_checks_returns_None_on_unparseable_json(monkeypatch):
-    monkeypatch.setattr(hc, "_gh", lambda *a, **k: "not json")
-    assert hc._pr_files_and_checks("o/r", 1) is None
+    monkeypatch.setattr(hc, "_gh_capture", lambda *a: (0, "not json", ""))
+    data, why = hc._pr_files_and_checks("o/r", 1)
+    assert data is None
+    assert "unparseable" in why
 
 
 def test_pr_files_and_checks_parses_a_good_result(monkeypatch):
     monkeypatch.setattr(
-        hc, "_gh",
-        lambda *a, **k: '{"files": [{"path": "a.txt"}], "statusCheckRollup": []}')
-    data = hc._pr_files_and_checks("o/r", 1)
+        hc, "_gh_capture",
+        lambda *a: (0, '{"files": [{"path": "a.txt"}], "statusCheckRollup": []}', ""))
+    data, why = hc._pr_files_and_checks("o/r", 1)
     assert data == {"files": [{"path": "a.txt"}], "statusCheckRollup": []}
+    assert why == ""
+
+
+def test_pr_files_and_checks_carries_ghs_own_reason(monkeypatch):
+    """infra-commons/meta#1060. The read needs `checks: read` on the job token; the
+    reusable did not grant it from 2026-08-14, so this call was DENIED for every PR
+    in every caller for twelve days while each daily run still concluded `success`.
+    The old message ("could not read changed files/check status") reads like a
+    transient hiccup. gh's own words are what separate the two, so they must reach
+    the log rather than being swallowed here."""
+    denial = "gh: Resource not accessible by integration (HTTP 403)"
+    monkeypatch.setattr(hc, "_gh_capture", lambda *a: (1, "", denial))
+    data, why = hc._pr_files_and_checks("o/r", 1)
+    assert data is None
+    assert why == denial
+
+
+# -- the reusable must GRANT what the read above needs ------------------------
+#
+# The assertion that would have caught #1060 on the day it landed: #98 introduced
+# the `statusCheckRollup` read and touched only the two action files, leaving the
+# workflow's permissions block untouched since 2026-07-16.
+
+_REUSABLE = (Path(__file__).parents[2]
+             / "workflows" / "daily-health-check-reusable.yml")
+
+
+@pytest.mark.parametrize("scope", ["checks", "statuses"])
+def test_reusable_grants_the_read_scopes_the_action_depends_on(scope):
+    """`gh pr view --json statusCheckRollup` is built from check-runs (`checks`)
+    and legacy commit statuses (`statuses`). Without both the read fails and every
+    Dependabot PR skips as unreadable — silently, since the run still succeeds.
+
+    Parsed as YAML, not scanned as text, and that is load-bearing: a first draft of
+    this test split the file on the literal `jobs:` and matched the CALLER-PATTERN
+    COMMENT at the top instead of the job. It passed against a file with the grant
+    deleted from the actual `permissions:` block — a guard that reads the
+    documentation of the thing instead of the thing.
+    """
+    spec = yaml.safe_load(_REUSABLE.read_text())
+    perms = spec["jobs"]["health-check"]["permissions"]
+    assert perms.get(scope) == "read", (
+        f"the reusable's job must grant `{scope}: read`; granted={perms}")
+
+
+def test_reusable_still_grants_the_write_scopes_it_always_had():
+    """#1060 ADDS two read scopes. It must not quietly cost the job any of the
+    four writes it already needs — approve, auto-merge, re-run, file issues."""
+    perms = yaml.safe_load(_REUSABLE.read_text())["jobs"]["health-check"]["permissions"]
+    assert {k: perms.get(k) for k in
+            ("contents", "pull-requests", "actions", "issues")} == {
+        "contents": "write", "pull-requests": "write",
+        "actions": "write", "issues": "write"}
+
+
+def test_documented_caller_pattern_lists_the_same_read_scopes():
+    """A reusable job's token is CAPPED by the caller's grant, so the reusable
+    granting these is necessary and not sufficient. The header is the only place a
+    caller author reads, so it has to say so too."""
+    header = _REUSABLE.read_text().split("permissions: {}", 1)[0]
+    assert "checks:        read" in header
+    assert "statuses:      read" in header
+
+
+# -- total_skip_warning ------------------------------------------------------
+
+def test_total_skip_warning_fires_when_every_pr_was_unreadable():
+    warning = hc.total_skip_warning({
+        "approved": 0, "already_approved": 0, "skipped_major": 0,
+        "skipped_unreadable": 3, "skipped_workflow_files": 0,
+        "skipped_failing_checks": 0, "errors": 0})
+    assert "permission gap" in warning
+    assert "Checks: read" in warning
+
+
+def test_total_skip_warning_silent_when_some_pr_was_readable():
+    """One unreadable PR beside a readable one is ordinary noise, not a capability
+    gap — the warning must stay rare enough to be worth reading."""
+    assert hc.total_skip_warning({
+        "approved": 1, "already_approved": 0, "skipped_major": 0,
+        "skipped_unreadable": 1, "skipped_workflow_files": 0,
+        "skipped_failing_checks": 0, "errors": 0}) == ""
+
+
+def test_total_skip_warning_silent_on_an_empty_queue():
+    """Zero unreadable out of zero PRs is not "everything was unreadable"."""
+    assert hc.total_skip_warning({
+        "approved": 0, "already_approved": 0, "skipped_major": 0,
+        "skipped_unreadable": 0, "skipped_workflow_files": 0,
+        "skipped_failing_checks": 0, "errors": 0}) == ""
 
 
 # -- triage_dependabot_prs: call-site wiring ---------------------------------
@@ -673,8 +768,16 @@ def dependabot_harness(monkeypatch):
             return ""
         return ""
 
+    def fake_gh_capture(*args):
+        if args[:2] == ("pr", "view"):
+            number = int(args[2])
+            data = state["pr_data"].get(number, {"files": [], "statusCheckRollup": []})
+            return 0, json.dumps(data), ""
+        return 0, "", ""
+
     monkeypatch.setattr(hc, "_gh_json", fake_gh_json)
     monkeypatch.setattr(hc, "_gh", fake_gh)
+    monkeypatch.setattr(hc, "_gh_capture", fake_gh_capture)
     monkeypatch.setattr(hc, "_approver_env", lambda: None)
     return state
 
@@ -722,7 +825,8 @@ def test_an_unreadable_pr_is_left_alone_not_merged(dependabot_harness, monkeypat
     pass — the exact class this repo has a recorded history of."""
     dependabot_harness["prs"] = [
         {"number": 5, "title": "bump foo from 1.0.0 to 1.0.1", "url": "u"}]
-    monkeypatch.setattr(hc, "_pr_files_and_checks", lambda repo, number: None)
+    monkeypatch.setattr(hc, "_pr_files_and_checks",
+                        lambda repo, number: (None, "denied"))
 
     result = hc.triage_dependabot_prs("o/r", "u", dry_run=False)
 

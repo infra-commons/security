@@ -131,7 +131,11 @@ jobs:
         # `anthropic` import is already guarded (falls back to pattern-only
         # diagnosis), so the tests would import without it; pin it anyway so
         # they exercise the same SDK surface that runs in production.
-        run: pip install pytest==8.3.4 'anthropic==0.49.0'
+        # `pyyaml` is test-only, same as the sibling jobs above: the tests parse
+        # this repo's own reusable workflow to assert the job grants the token
+        # scopes the action's reads depend on (infra-commons/meta#1060). The
+        # action itself does not import yaml.
+        run: pip install pytest==8.3.4 'anthropic==0.49.0' pyyaml==6.0.2
 
       - name: Run tests
         run: python -m pytest .github/actions/daily-health-check -q

@@ -121,6 +121,20 @@ def _gh(*args: str, check: bool = True, env: dict | None = None) -> str:
     return result.stdout.strip()
 
 
+def _gh_capture(*args: str) -> tuple[int, str, str]:
+    """`gh` with the exit code and stderr kept: (returncode, stdout, stderr).
+
+    `_gh` above deliberately discards both, which is right for every caller that
+    only wants output. It is wrong for one: `_pr_files_and_checks` fails CLOSED, so
+    when its read is denied the reason is the only evidence anyone gets that
+    anything is wrong at all — the run itself still concludes `success`. See that
+    function.
+    """
+    result = subprocess.run(
+        ["gh"] + list(args), capture_output=True, text=True, check=False)
+    return result.returncode, result.stdout.strip(), (result.stderr or "").strip()
+
+
 def _approver_env() -> dict | None:
     """Environment for the Dependabot *approve* call only.
 
@@ -710,24 +724,38 @@ def _is_major_bump(pr_title: str) -> bool:
     return bool(m and int(m.group(2)) > int(m.group(1)))
 
 
-def _pr_files_and_checks(repo: str, number: int) -> dict | None:
+def _pr_files_and_checks(repo: str, number: int) -> tuple[dict | None, str]:
     """Changed files + check-run rollup for one Dependabot PR.
 
-    None means the read itself failed (gh error, empty output, unparseable
-    JSON) — the caller must treat that the same as "unsafe to merge", never as
-    "no checks, no problem". Reading an absent result as a pass is a repeat of
-    a documented failure mode in this repo (infra-commons/meta#624, and the
-    #86 incident itself: a FAILURE the merge path never looked at).
+    Returns `(data, why)`. `data is None` means the read itself failed (gh error,
+    empty output, unparseable JSON) — the caller must treat that the same as
+    "unsafe to merge", never as "no checks, no problem". Reading an absent result
+    as a pass is a repeat of a documented failure mode in this repo
+    (infra-commons/meta#624, and the #86 incident itself: a FAILURE the merge path
+    never looked at).
+
+    `why` carries gh's own stderr on failure, and it is the whole reason this
+    returns a tuple. This read needs `checks: read` + `statuses: read` on the job
+    token; the reusable did not grant them from 2026-08-14 (when #98 introduced
+    `statusCheckRollup` here) until infra-commons/meta#1060, so the read was denied
+    for EVERY PR in EVERY caller — and the log said only "could not read changed
+    files/check status", which reads like a transient hiccup rather than a
+    permanent, total, permission-shaped outage. A run that skips 100% of its input
+    still concludes `success`, so the message was the only signal there was.
+    Nothing about the DECISION changes here: an unreadable PR is still fully
+    skipped.
     """
-    raw = _gh("pr", "view", str(number), "--repo", repo,
-               "--json", "files,statusCheckRollup", check=False)
-    if not raw:
-        return None
+    rc, raw, err = _gh_capture("pr", "view", str(number), "--repo", repo,
+                               "--json", "files,statusCheckRollup")
+    if rc != 0 or not raw:
+        return None, err or "gh produced no output"
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+        return None, "gh returned unparseable JSON"
+    if not isinstance(data, dict):
+        return None, "gh returned an unexpected JSON shape"
+    return data, ""
 
 
 # Terminal-failure states. PENDING/IN_PROGRESS/QUEUED (or no conclusion at
@@ -764,6 +792,27 @@ def _touches_workflow_files(files) -> bool:
     `github_actions`-group bump) and were not previously subject to it."""
     return any((f.get("path") or "").startswith(".github/workflows/")
                for f in (files or []))
+
+
+def total_skip_warning(dep: dict) -> str:
+    """A line for the digest when EVERY Dependabot PR skipped as unreadable, else "".
+
+    Total unreadability is not a run of bad luck, it is a capability the job does not
+    have - and it is invisible in the run's conclusion, which stays `success` because
+    skipping everything succeeds. This names the likely cause rather than leaving the
+    next reader to rediscover it: measured fleet-wide on infra-commons/meta#1060, the
+    cause was the job token lacking `checks: read`, unbroken from 2026-08-14 until
+    2026-08-26 across every caller, with all twelve daily runs in between green.
+    """
+    seen = sum(dep.get(k, 0) for k in (
+        "approved", "already_approved", "skipped_major", "skipped_unreadable",
+        "skipped_workflow_files", "skipped_failing_checks", "errors"))
+    if not dep.get("skipped_unreadable") or dep["skipped_unreadable"] != seen:
+        return ""
+    return ("  WARNING: every open Dependabot PR was unreadable - a permission gap, "
+            "not bad luck. Check this run's GITHUB_TOKEN Permissions group for "
+            "'Checks: read' and 'Statuses: read'; a caller granting less than the "
+            "reusable's documented set caps this job's token silently.")
 
 
 def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict:
@@ -803,10 +852,10 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
         # `gh pr merge --auto` only waits on required checks, so an advisory
         # failure (e.g. the Dockerfile digest guard) is structurally invisible
         # to it unless this function refuses first (#86).
-        data = _pr_files_and_checks(repo, number)
+        data, why = _pr_files_and_checks(repo, number)
         if data is None:
             print(f"  SKIP #{number}: could not read changed files/check "
-                  f"status — leaving for manual review")
+                  f"status — leaving for manual review ({why})")
             skipped_unreadable += 1
             continue
 
@@ -1241,8 +1290,12 @@ def main() -> None:
             f"skipped_unreadable={dep['skipped_unreadable']} | "
             f"skipped_workflow_files={dep['skipped_workflow_files']} | "
             f"skipped_failing_checks={dep['skipped_failing_checks']} | "
-            f"errors={dep['errors']}\n"
+            f"errors={dep['errors']}"
         )
+        warning = total_skip_warning(dep)
+        if warning:
+            print(warning)
+        print()
 
     print("── Auto-merged in last 24h ───────────────────────────────────────────")
     auto_merged = find_auto_merged_last_24h(args.repo, args.lookback_hours)
