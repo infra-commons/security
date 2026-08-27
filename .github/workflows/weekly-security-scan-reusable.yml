@@ -139,7 +139,7 @@ jobs:
       findings_path: ${{ steps.scan.outputs.findings_path }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Semgrep scan (JSON output)
         id: scan
@@ -173,7 +173,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Resolve Trivy severity list from severity_floor
         # Trivy was previously hardwired to HIGH,CRITICAL regardless of
@@ -219,10 +219,10 @@ jobs:
           output: trivy-fs.json
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Build image for scanning
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: false
@@ -263,7 +263,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
         with:
@@ -304,7 +304,7 @@ jobs:
       CFG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select the infra-repo credential (fail closed)
         id: infra_cred
@@ -338,7 +338,7 @@ jobs:
 
       - name: Check out infra repo
         if: ${{ inputs.infra_repo != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.infra_repo }}
           token: ${{ steps.infra_token.outputs.token || secrets.PLATFORM_IAC_TOKEN }}
@@ -376,7 +376,7 @@ jobs:
 
       - name: Check out config repo
         if: ${{ inputs.secrets_repo != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.secrets_repo }}
           token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
@@ -419,7 +419,7 @@ jobs:
       CFG_TOKEN: ${{ secrets.CLIENTS_CONFIG_TOKEN }}
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select the infra-repo credential (fail closed)
         id: infra_cred
@@ -453,7 +453,7 @@ jobs:
 
       - name: Check out infra repo
         if: ${{ inputs.infra_repo != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.infra_repo }}
           token: ${{ steps.infra_token.outputs.token || secrets.PLATFORM_IAC_TOKEN }}
@@ -491,7 +491,7 @@ jobs:
 
       - name: Check out config repo
         if: ${{ inputs.secrets_repo != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.secrets_repo }}
           token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
@@ -560,7 +560,7 @@ jobs:
           repositories: ${{ steps.cfg_cred.outputs.repo }}
 
       - name: Check out config repo (full history)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.secrets_repo }}
           token: ${{ steps.cfg_token.outputs.token || secrets.CLIENTS_CONFIG_TOKEN }}
@@ -598,7 +598,7 @@ jobs:
       issues: write
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Download all findings artifacts into named subdirectories.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -662,7 +662,7 @@ jobs:
       issues: write
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: infra-commons/security/.github/actions/suppression-audit@suppression-audit/v1
         with:
