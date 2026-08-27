@@ -644,6 +644,13 @@ jobs:
           repo: ${{ github.repository }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           severity-floor: ${{ inputs.severity_floor }}
+          # This job runs under `if: always()` so partial results are persisted —
+          # which also means it writes a dashboard on runs where every scanner
+          # above it failed. Tell the renderer, or that dashboard is byte-identical
+          # to a healthy run's. `skipped` is deliberately NOT degraded: the
+          # ai-review jobs and gitleaks are skipped by design on most runs, and a
+          # banner that fires on the healthy case is one operators learn to ignore.
+          run-degraded: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
           semgrep-findings: _artifacts/semgrep/semgrep-findings.json
           trivy-fs-findings: _artifacts/trivy/trivy-fs.json
           trivy-image-findings: _artifacts/trivy/trivy-image.json

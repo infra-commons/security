@@ -145,6 +145,40 @@ def resolve_severity_floor() -> str:
         )
     return DEFAULT_SEVERITY_FLOOR
 
+# Recognised false-y spellings of the `run-degraded` action input. Anything
+# else — including a mis-set or unexpanded expression — is treated as degraded;
+# see run_degraded_from_env().
+_RUN_HEALTHY_VALUES = {"", "false", "0", "no"}
+_RUN_DEGRADED_VALUES = {"true", "1", "yes"}
+
+
+def run_degraded_from_env() -> bool:
+    """Whether the workflow run that is writing this dashboard is itself degraded.
+
+    Supplied by the caller workflow from `needs.*.result` via the `run-degraded`
+    action input. The dashboard-writing job runs under `if: always()` — by design,
+    so partial results are still persisted — which means it writes just as happily
+    on a run where every scanner job above it failed. Nothing else reaches this
+    script from that job's own outcome, so without this input the dashboard a
+    failed run writes is byte-identical to the one a healthy run writes.
+
+    Fail-safe parse: an unrecognised value is treated as DEGRADED, with a warning
+    naming it. The alternative — defaulting an unparseable value to "healthy" —
+    would silently restore the exact fail-open this exists to close.
+    """
+    raw = os.environ.get("RUN_DEGRADED", "").strip().lower()
+    if raw in _RUN_HEALTHY_VALUES:
+        return False
+    if raw not in _RUN_DEGRADED_VALUES:
+        print(
+            f"  WARNING: RUN_DEGRADED={raw!r} is not a recognised boolean "
+            f"(expected one of true/false/1/0/yes/no); treating the run as "
+            f"degraded rather than assuming it was healthy.",
+            file=sys.stderr,
+        )
+    return True
+
+
 # ── Sanitisation ───────────────────────────────────────────────────────────────
 
 _UNICODE_LINE_SEPS = frozenset((0x2028, 0x2029))
@@ -966,8 +1000,45 @@ def ensure_labels_exist(token: str, repo: str) -> None:
                 resp.raise_for_status()
 
 
+def _fetch_open_issues_by_label(token: str, repo: str, label: str) -> tuple[list[dict], bool]:
+    """Return (issues, truncated) for one open-issue label query.
+
+    Shared pagination for both the narrow auto-close fetch and the wider
+    dashboard fetch below. `truncated` is True when the page cap was hit.
+    """
+    issues: list[dict] = []
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
+        for page in range(1, _MAX_ISSUE_PAGES + 1):
+            resp = client.get(
+                f"{GITHUB_API}/repos/{repo}/issues",
+                headers=_gh_headers(token),
+                params={"labels": label, "state": "open", "per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            issues.extend(batch)
+            if len(batch) < 100:
+                return issues, False
+    # for loop exhausted without a short-page break — hit the cap.
+    print(
+        f"WARNING: hit _MAX_ISSUE_PAGES={_MAX_ISSUE_PAGES} while fetching open "
+        f"{label!r} issues — results are incomplete. Auto-close is disabled on any "
+        f"run that sees this, to avoid mass-closing real issues, and dashboard "
+        f"counts understate the true total. Raise the cap or audit the repo's open "
+        f"issues.",
+        file=sys.stderr,
+    )
+    return issues, True
+
+
 def fetch_open_security_issues(token: str, repo: str) -> tuple[dict[str, dict], bool]:
-    """Return (issues_by_title, truncated).
+    """Return (issues_by_title, truncated) for open `security`-labelled issues.
+
+    Deliberately narrow: this is the set the auto-close pass iterates, and every
+    issue in it is a candidate for closing. Widening it would hand the close loop
+    issues this scan never opened — the failure mode of infra-commons/security#65.
+    The dashboard's wider view is a separate fetch (`fetch_dashboard_issues`)
+    which nothing closes.
 
     `truncated` is True when the page cap was hit. Callers must skip the
     auto-close step in that case: with an incomplete view of open issues
@@ -976,29 +1047,45 @@ def fetch_open_security_issues(token: str, repo: str) -> tuple[dict[str, dict], 
     who opens 2000+ security-labelled issues can suppress auto-close for one
     run but cannot suppress the creation of new finding issues.
     """
-    issues: dict[str, dict] = {}
-    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
-        for page in range(1, _MAX_ISSUE_PAGES + 1):
-            resp = client.get(
-                f"{GITHUB_API}/repos/{repo}/issues",
-                headers=_gh_headers(token),
-                params={"labels": "security", "state": "open", "per_page": 100, "page": page},
-            )
-            resp.raise_for_status()
-            batch = resp.json()
-            for issue in batch:
-                issues[issue["title"]] = issue
-            if len(batch) < 100:
-                return issues, False
-    # for loop exhausted without a short-page break — hit the cap.
-    print(
-        f"WARNING: hit _MAX_ISSUE_PAGES={_MAX_ISSUE_PAGES} while fetching open "
-        f"security issues — results are incomplete. Auto-close disabled for this "
-        f"run to avoid mass-closing real issues. Raise the cap or audit the "
-        f"repo's open security issues.",
-        file=sys.stderr,
-    )
-    return issues, True
+    issues, truncated = _fetch_open_issues_by_label(token, repo, "security")
+    return {issue["title"]: issue for issue in issues}, truncated
+
+
+# Labels the dashboard counts. `security` alone is not enough: nothing enforces
+# that a producer applies it, so an issue can carry `severity:critical` and never
+# be seen by a `label:security` query — invisible to every number on the
+# dashboard while being exactly the thing the dashboard exists to surface. The
+# canonical severities are unioned in, and any issue found only that way is
+# called out by build_status_body() so the missing label gets fixed rather than
+# silently papered over.
+DASHBOARD_LABELS: tuple[str, ...] = ("security",) + tuple(
+    f"severity:{s.lower()}"
+    for s in sorted(ALLOWED_SEVERITIES, key=SEVERITY_RANK.get, reverse=True)
+)
+
+
+def fetch_dashboard_issues(token: str, repo: str) -> tuple[dict[str, dict], bool]:
+    """Return (issues_by_number, truncated) — the union of DASHBOARD_LABELS.
+
+    Read-only input to the dashboard renderer; no issue reached this way is ever
+    closed or commented on (see `fetch_open_security_issues` for that set).
+
+    Keyed by issue number rather than title so the same issue returned under two
+    label queries counts once, and two distinct issues sharing a title both
+    survive. Pull requests are dropped: the issues endpoint returns them too, and
+    a PR carrying a `severity:` label would otherwise read on the dashboard as an
+    open finding forever.
+    """
+    merged: dict[str, dict] = {}
+    truncated = False
+    for label in DASHBOARD_LABELS:
+        issues, page_capped = _fetch_open_issues_by_label(token, repo, label)
+        truncated = truncated or page_capped
+        for issue in issues:
+            if "pull_request" in issue:
+                continue
+            merged[str(issue["number"])] = issue
+    return merged, truncated
 
 
 def close_issue(token: str, repo: str, issue_number: int, run_url: str) -> None:
@@ -1116,8 +1203,28 @@ def build_status_body(
     run_url: str,
     all_open: dict[str, dict],
     truncated: bool = False,
+    unreported_sources: set[str] | None = None,
+    run_degraded: bool = False,
 ) -> str:
     """Render the Security Status Dashboard body.
+
+    Three of this function's inputs exist so that a DEGRADED run cannot render
+    identically to a healthy one — the dashboard's central failure mode, since
+    its whole job is to be read at a glance:
+
+      * `run_degraded` — the run writing this dashboard did not itself complete
+        cleanly. Both callers run under `if: always()`, so this is the only thing
+        that distinguishes "everything scanned clean" from "half the scanners
+        crashed and this is what was left".
+      * `unreported_sources` — scanners that produced no artifact this run. Their
+        counts here are last-known values, not measurements; a zero in their row
+        means "not measured", not "clean". The same set already protects
+        auto-close in run_create_issues().
+      * `truncated` — the open-issue list hit the API page cap, so the totals are
+        a floor.
+
+    Each renders a distinct, named warning: an operator who reads only the
+    numbers must not be able to mistake any of the three for a clean bill.
 
     `total_by_sev` (the headline severity table) and `counts` (the by-source
     table) are each computed directly from `all_open` in one pass — neither is
@@ -1137,6 +1244,9 @@ def build_status_body(
     """
     sevs = sorted(ALLOWED_SEVERITIES, key=SEVERITY_RANK.get, reverse=True)  # CRITICAL..LOW
     sev_cols = sevs + [_OTHER_SEV]
+    # Lower-cased to match the source keys derived from live labels below, so a
+    # scanner marked unreported always lands on its own row rather than beside it.
+    unreported = {str(s).lower() for s in (unreported_sources or set())}
 
     total_by_sev: dict[str, int] = {s: 0 for s in sev_cols}
     # Pre-seed the five known sources (plus _OTHER_SRC) so a source that is
@@ -1146,6 +1256,13 @@ def build_status_body(
     # isn't one of the five (e.g. source:pentest) still gets a row via
     # setdefault() below; it just wasn't known in advance.
     counts: dict[str, dict[str, int]] = {src: {s: 0 for s in sev_cols} for src in _SRC_DISPLAY}
+    # A scanner that failed AND has no open issues would otherwise have no row at
+    # all to carry its "did not report" marker — the one case where the warning
+    # matters most, since there is nothing else on the page to look wrong.
+    for src in unreported:
+        counts.setdefault(src, {s: 0 for s in sev_cols})
+
+    missing_security_label = 0
 
     for issue in all_open.values():
         label_names = {lbl["name"] for lbl in issue.get("labels", [])}
@@ -1171,6 +1288,12 @@ def build_status_body(
         )
         src = src_labels[0] if src_labels else _OTHER_SRC
 
+        # Counted here but invisible to every `label:security` query — including
+        # the Quick links below and the auto-close fetch. Surfaced, not silently
+        # absorbed, so the label actually gets fixed.
+        if "security" not in label_names:
+            missing_security_label += 1
+
         total_by_sev[sev] += 1
         counts.setdefault(src, {s: 0 for s in sev_cols})[sev] += 1
 
@@ -1189,6 +1312,18 @@ def build_status_body(
         f"_Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC "
         f"by [weekly security scan]({run_url})_",
         "",
+    ]
+    # Above the first number, deliberately: a reader who takes only the headline
+    # table must not be able to miss that the run producing it was broken.
+    if run_degraded:
+        lines.append(
+            f"> 🚨 **The scan run that wrote this dashboard did not complete cleanly.** "
+            f"One or more of its jobs failed or was cancelled, so the counts below are "
+            f"only as complete as what that run managed to collect — a floor, not a "
+            f"clean bill of health. See the [run logs]({run_url})."
+        )
+        lines.append("")
+    lines += [
         "### Open findings by severity",
         "",
         "| Severity | Total |",
@@ -1214,6 +1349,20 @@ def build_status_body(
             f"are counted in the \"Other / unattributed\" row of the table below instead of "
             f"being dropped. Check their labels."
         )
+    if missing_security_label:
+        lines.append(
+            f"> ⚠️ **{missing_security_label} issue(s) counted above carry a recognised "
+            f"`severity:` label but not `security`** — they are invisible to every "
+            f"`label:security` query, including the Quick links below. Add the `security` "
+            f"label to them (or remove the severity label if they are not findings)."
+        )
+    if unreported:
+        named = ", ".join(_display_source(s) for s in sorted(unreported))
+        lines.append(
+            f"> ⚠️ **{len(unreported)} scanner(s) did not report this run: {named}.** Their "
+            f"rows in the table below carry the last known counts, not this run's — a zero "
+            f"there means \"not measured\", not \"clean\"."
+        )
     if truncated:
         lines.append(
             "> ⚠️ **The open-issue list hit the API page cap** — this dashboard reflects only "
@@ -1226,7 +1375,12 @@ def build_status_body(
         "### Open findings by source",
         "",
     ]
-    if not all_open:
+    # An empty table is replaced by a plain sentence — but only when the run has
+    # something to be clean ABOUT. With a scanner that did not report, "no open
+    # issues" is the sharpest form of the false all-clear (there is nothing else
+    # on the page to look wrong), so the table is rendered so its rows can carry
+    # the marker.
+    if not all_open and not unreported:
         lines.append("_No open `security`-labelled issues._")
     else:
         lines += [
@@ -1235,12 +1389,18 @@ def build_status_body(
         ]
         for src in sorted(counts, key=_source_sort_key):
             c = counts[src]
+            name = _display_source(src)
+            if src in unreported:
+                # No pipe characters — the row must stay a well-formed table row.
+                name += " ⚠️ **did not report this run**"
             lines.append(
-                f"| {_display_source(src)} | {c['CRITICAL']} | {c['HIGH']} | {c['MEDIUM']} | "
+                f"| {name} | {c['CRITICAL']} | {c['HIGH']} | {c['MEDIUM']} | "
                 f"{c['LOW']} | {c[_OTHER_SEV]} |"
             )
 
     base_url = f"https://github.com/{repo}/issues"
+    # GitHub search treats comma-separated values inside one `label:` as OR.
+    sev_or = "%2C".join(f"severity%3A{s.lower()}" for s in sevs)
     lines += [
         "",
         "### Quick links",
@@ -1249,6 +1409,8 @@ def build_status_body(
         f"- [CRITICAL only]({base_url}?q=is%3Aopen+label%3Asecurity+label%3Aseverity%3Acritical)",
         f"- [HIGH only]({base_url}?q=is%3Aopen+label%3Asecurity+label%3Aseverity%3Ahigh)",
         f"- [Adversarial AI findings]({base_url}?q=is%3Aopen+label%3Asource%3Aadversarial-ai)",
+        f"- [Severity-labelled but missing `security`]"
+        f"({base_url}?q=is%3Aopen+label%3A{sev_or}+-label%3Asecurity)",
         f"- [Weekly scan workflow](https://github.com/{repo}/actions/workflows/security-scan.yml)",
         "",
         "---",
@@ -1555,16 +1717,33 @@ def run_create_issues() -> None:
 
     # ── Update Security Status dashboard ──────────────────────────────────────
     print("Updating Security Status dashboard …")
-    open_issues, dashboard_truncated = fetch_open_security_issues(token, repo)
+    # Wider than the auto-close fetch above (see DASHBOARD_LABELS): an issue with
+    # a canonical `severity:` label but no `security` label is a finding the
+    # dashboard must count, even though nothing here may close it.
+    dashboard_open, dashboard_truncated = fetch_dashboard_issues(token, repo)
+    print(f"  Dashboard scope: {len(dashboard_open)} open issue(s) across "
+          f"{', '.join(DASHBOARD_LABELS)}")
     # Exclude issues that were just closed this run — GitHub's API is eventually
     # consistent and may still return them as open for a brief period.
     if just_closed_numbers:
-        open_issues = {t: i for t, i in open_issues.items()
-                       if i["number"] not in just_closed_numbers}
+        dashboard_open = {k: i for k, i in dashboard_open.items()
+                          if i["number"] not in just_closed_numbers}
 
-    # Also fetch azure-defender issues (they're labelled security too if the
-    # azure-secure-score workflow was updated; if not, they won't appear here)
-    status_body = build_status_body(repo, run_url, open_issues, truncated=dashboard_truncated)
+    # `unreported` is the same set that protected auto-close above. It has to
+    # reach the renderer too, or a run where a scanner failed to report renders
+    # an all-zero row for it that is indistinguishable from a clean scan — the
+    # fail-open of infra-commons/security#96 in the other direction.
+    degraded = run_degraded_from_env()
+    if degraded:
+        print("  NOTE: this run is marked degraded — the dashboard will say so.")
+    status_body = build_status_body(
+        repo,
+        run_url,
+        dashboard_open,
+        truncated=dashboard_truncated,
+        unreported_sources=unreported,
+        run_degraded=degraded,
+    )
 
     # Find or create the dashboard issue (labelled security-status, not security)
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
@@ -1609,8 +1788,9 @@ def run_update_dashboard() -> None:
         _validate_run_url(run_url)
 
     print("Fetching open security issues …")
-    open_issues, truncated = fetch_open_security_issues(token, repo)
-    print(f"  Found {len(open_issues)} open security issue(s)")
+    open_issues, truncated = fetch_dashboard_issues(token, repo)
+    print(f"  Found {len(open_issues)} open issue(s) across "
+          f"{', '.join(DASHBOARD_LABELS)}")
     if truncated:
         print(
             "  WARNING: issue list hit the page cap — dashboard counts may be "
@@ -1618,8 +1798,14 @@ def run_update_dashboard() -> None:
             file=sys.stderr,
         )
 
+    # No scanner ran in this mode, so there is no `unreported` set to pass — the
+    # counts come entirely from open issues. RUN_DEGRADED still applies: this
+    # mode's caller also runs under `if: always()`.
     print("Refreshing Security Status dashboard …")
-    status_body = build_status_body(repo, run_url, open_issues, truncated=truncated)
+    status_body = build_status_body(
+        repo, run_url, open_issues, truncated=truncated,
+        run_degraded=run_degraded_from_env(),
+    )
 
     with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
         resp = client.get(

@@ -52,6 +52,17 @@ inputs:
       Empty or unrecognised defaults to LOW (report everything).
     required: false
     default: ""
+  run-degraded:
+    description: >-
+      Whether the run writing the dashboard is itself degraded (create-issues /
+      update-dashboard). Pass the caller's own job outcomes, e.g.
+      `${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}`.
+      Both dashboard-writing jobs run under `if: always()`, so nothing else tells the
+      renderer that the scan it is reporting on fell over — without this a failed run
+      writes a dashboard identical to a healthy one. Empty/false means healthy; an
+      unrecognised value is treated as degraded rather than assumed clean.
+    required: false
+    default: ""
 
   # ── create-issues mode — findings artifact paths ────────────────────────────
   semgrep-findings:
@@ -121,6 +132,7 @@ runs:
         REPO: ${{ inputs.repo }}
         RUN_URL: ${{ inputs.run-url }}
         SEVERITY_FLOOR: ${{ inputs.severity-floor }}
+        RUN_DEGRADED: ${{ inputs.run-degraded }}
         # create-issues — findings artifact paths
         SEMGREP_FINDINGS: ${{ inputs.semgrep-findings }}
         TRIVY_FS_FINDINGS: ${{ inputs.trivy-fs-findings }}

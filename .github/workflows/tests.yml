@@ -180,7 +180,11 @@ jobs:
         # call_gpt4o(), so no test needed them installed until security#815 added
         # direct coverage for their truncation guards (mirrors the identical gap
         # fixed for adversarial-review/capture-findings in the same sweep).
-        run: pip install pytest==8.3.4 anthropic==0.49.0 openai==1.75.0 httpx==0.28.1
+        # `pyyaml` is test-only, same as the sibling jobs above: the tests parse
+        # this repo's own action.yml and reusable workflow to assert the renderer
+        # is actually TOLD when a run is degraded. That wiring is the defect, so a
+        # test that cannot see the YAML cannot catch it coming back.
+        run: pip install pytest==8.3.4 anthropic==0.49.0 openai==1.75.0 httpx==0.28.1 pyyaml==6.0.2
 
       - name: Run tests
         # This action can CLOSE issues in every consuming repo, and it had no test
