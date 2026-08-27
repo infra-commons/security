@@ -91,13 +91,13 @@ jobs:
       TARGET_URL: ${{ inputs.target_url }}
       MIN_SEVERITY: ${{ inputs.min_severity }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Ship the triage script with the reusable rather than the caller. Pinned
       # to the caller-supplied security_ref so the triage code is the version the
       # caller reviewed alongside this workflow.
       - name: Checkout infra-commons/security (triage script)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: infra-commons/security
           ref: ${{ inputs.security_ref }}
@@ -106,7 +106,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout Nuclei templates (pinned)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: projectdiscovery/nuclei-templates
           ref: ${{ env.NUCLEI_TEMPLATES_REF }}
