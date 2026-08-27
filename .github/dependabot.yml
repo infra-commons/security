@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Pen-test toolkit runtime dependencies (pentest/requirements.txt).
+  - package-ecosystem: pip
+    directory: "/pentest"
+    schedule:
+      interval: weekly
+    groups:
+      # Batch minor/patch bumps into one weekly PR; majors open individually.
+      pip-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # GitHub Actions version pins.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      # Batch minor/patch action bumps into one PR; majors open individually.
+      github-actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
