@@ -42,7 +42,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -342,6 +342,64 @@ def _validate_suppressions(raw: list[dict]) -> list[dict]:
     return validated
 
 
+def _drop_expired(suppressions: list[dict]) -> list[dict]:
+    """Drop entries whose `expires` date has passed.
+
+    Mirrors the expiry enforcement in `adversarial-review.py::load_suppressions()`,
+    including its fail-open handling of an unparseable date. Until this existed, the
+    two consumers of the same file disagreed about what `expires` means: the PR-time
+    gate honoured it, this post-merge path ignored the key entirely. On a repo whose
+    only consumer is capture-findings (any Tier C repo, and every Dependabot or fork
+    merge, which the PR-time gate skips for lack of secret access), that made every
+    expiry date decorative — an expired suppression suppressed forever, on the path
+    that has no CRITICAL exemption.
+
+    `suppression-audit.py` reports expired entries as informational precisely because
+    it assumed they were already inert at load time. That assumption is what this
+    restores.
+
+    An unparseable `expires` is kept, not dropped, matching adversarial-review.py: a
+    typo in a date must not silently widen what a review reports, and the warning is
+    the signal. The `<= 30 days` notice is likewise carried over so a lapse is visible
+    in CI output before it happens, not after.
+    """
+    today = date.today()
+    active: list[dict] = []
+    for entry in suppressions:
+        eid = entry.get("id", "unknown")
+        raw_expires = entry.get("expires", "")
+        if not raw_expires:
+            active.append(entry)
+            continue
+        try:
+            expires = date.fromisoformat(str(raw_expires))
+        except ValueError:
+            print(
+                f"Warning: suppression '{eid}' has unparseable expires value "
+                f"{raw_expires!r} — treated as no expiry",
+                file=sys.stderr,
+            )
+            active.append(entry)
+            continue
+
+        days_left = (expires - today).days
+        if days_left < 0:
+            print(
+                f"Warning: suppression '{eid}' expired {expires} ({-days_left} days ago) "
+                "— skipping; finding will be filed if it recurs",
+                file=sys.stderr,
+            )
+            continue
+        if days_left <= 30:
+            print(
+                f"Warning: suppression '{eid}' expires in {days_left} days ({expires}) "
+                "— renew or remove before it lapses",
+                file=sys.stderr,
+            )
+        active.append(entry)
+    return active
+
+
 def load_suppressions(before_sha: str) -> list[dict]:
     """Load and merge canonical platform suppressions with repo-local ones.
 
@@ -373,6 +431,10 @@ def load_suppressions(before_sha: str) -> list[dict]:
     The merged set is passed through `_validate_suppressions()` before it's returned,
     so a missing, invalid, or trivially-broad `file_pattern`/`finding_pattern` in
     either source is dropped with a warning rather than silently matching everything.
+
+    It is then passed through `_drop_expired()`, so an `expires:` set in either source
+    is honoured here exactly as it already is in `adversarial-review.py` — see that
+    function for why this path needs it at least as much as the PR-time gate does.
     """
     github_repo = os.environ.get("GITHUB_REPOSITORY", "")
     input_repo = os.environ.get("REPO", "")
@@ -426,7 +488,7 @@ def load_suppressions(before_sha: str) -> list[dict]:
                     file=sys.stderr,
                 )
             by_id[eid] = entry
-    return _validate_suppressions(list(by_id.values()))
+    return _drop_expired(_validate_suppressions(list(by_id.values())))
 
 
 def build_suppression_context(suppressions: list[dict]) -> str:

@@ -24,6 +24,7 @@ Two deliberate choices about how this tests:
 import importlib.util
 import re
 import subprocess
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -449,3 +450,97 @@ def test_a_well_scoped_entry_survives_validation():
     """The floor must not reject legitimate narrow entries — proven against a real canonical one."""
     real_entry = next(e for e in ENTRIES if e["id"] == "sha-pin-first-party-workflows")
     assert capture._validate_suppressions([real_entry]) == [real_entry]
+
+
+# ── _drop_expired: the expiry floor ───────────────────────────────────────────────────────────
+# Until this existed, `capture.py` had zero references to `expires` while
+# `adversarial-review.py` enforced it and `suppression-audit.py` reported on it — and the
+# audit's exit-0 justification said expired entries were "already inactive" because it only
+# knew about the PR-time path. On a Tier C repo, or on any Dependabot/fork merge (which the
+# PR-time gate skips for lack of secret access), capture-findings is the ONLY consumer, so an
+# expired suppression suppressed forever on the path with no CRITICAL exemption.
+#
+# Same style as the block above: dates are computed from `date.today()` so no test rots on a
+# fixed calendar day, and each drop assertion carries a foil half through the real
+# `is_suppressed` matcher so it cannot pass vacuously.
+
+AN_EXPIRABLE_ENTRY = {
+    "id": "synthetic-expirable",
+    "file_pattern": r"src/.*\.py(:\d+(-\d+)?)?$",
+    "finding_pattern": "hardcoded credential",
+    "reason": "synthetic",
+}
+
+
+def _with_expires(value):
+    return {**AN_EXPIRABLE_ENTRY, "expires": value}
+
+
+def test_expired_suppression_is_dropped_not_honoured_at_match():
+    """The core defect: an entry past its expires date must not survive load."""
+    entry = _with_expires(str(date.today() - timedelta(days=1)))
+    assert capture._drop_expired([entry]) == [], (
+        "an entry that expired yesterday survived _drop_expired — its expires date is "
+        "decorative, and the suppression never lapses on the post-merge path"
+    )
+    # Foil half: prove the un-filtered entry really would have suppressed a live CRITICAL,
+    # so the assertion above is about a real consequence and not a no-op fixture.
+    hit, _ = capture.is_suppressed(A_REAL_FINDING, [entry])
+    assert hit, "the synthetic entry does not even reproduce the suppression — fix the fixture"
+
+
+def test_unexpired_suppression_survives():
+    """The floor must not drop an entry that is still validly in force."""
+    entry = _with_expires(str(date.today() + timedelta(days=180)))
+    assert capture._drop_expired([entry]) == [entry]
+
+
+def test_entry_without_expires_is_permanent():
+    """`expires` is optional by design (see the canonical file's header) — omitting it keeps."""
+    real_entry = next(e for e in ENTRIES if e["id"] == "sha-pin-first-party-workflows")
+    assert "expires" not in real_entry, "fixture drifted — pick a still-permanent canonical entry"
+    assert capture._drop_expired([real_entry]) == [real_entry]
+
+
+def test_unparseable_expires_is_kept_with_a_warning(capsys):
+    """Fail-open on a typo'd date, deliberately — mirrors adversarial-review.py.
+
+    Pinned as a test rather than left implicit so a future reader sees this was a decision
+    (a bad date must not silently widen what a review reports; the warning is the signal),
+    not an accident of the parsing code.
+    """
+    entry = _with_expires("soon")
+    assert capture._drop_expired([entry]) == [entry]
+    assert "unparseable expires" in capsys.readouterr().err
+
+
+def test_expiring_soon_is_kept_but_warned(capsys):
+    """A lapse must be visible in CI output before it happens, not only after."""
+    entry = _with_expires(str(date.today() + timedelta(days=7)))
+    assert capture._drop_expired([entry]) == [entry]
+    err = capsys.readouterr().err
+    assert "expires in 7 days" in err, err
+
+
+def test_load_suppressions_applies_the_expiry_filter(monkeypatch):
+    """The wiring test: correct-in-isolation but unwired is exactly the failure shape here.
+
+    `_drop_expired` passing its own unit tests proves nothing if `load_suppressions` never
+    calls it — which is precisely how the missing enforcement went unnoticed. Drive the real
+    entry point and assert the expired entry does not come out the other side.
+    """
+    expired = _with_expires(str(date.today() - timedelta(days=1)))
+    live = {**AN_EXPIRABLE_ENTRY, "id": "synthetic-live"}
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", capture.PLATFORM_IAC_REPO)
+    monkeypatch.delenv("REPO", raising=False)
+    # platform-iac self-run: canonical and repo-local are the same file, so one stub covers both
+    # and the test does not depend on GITHUB_ACTION_PATH or the on-disk canonical file.
+    monkeypatch.setattr(capture, "_fetch_raw_from_sha", lambda path, sha: [expired, live])
+
+    out = capture.load_suppressions("0" * 40)
+    ids = {e["id"] for e in out}
+    assert ids == {"synthetic-live"}, (
+        f"load_suppressions returned {ids} — the expiry filter is not wired into the real "
+        "load path, so nothing drops an expired entry in production"
+    )
