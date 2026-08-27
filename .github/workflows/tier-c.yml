@@ -20,7 +20,16 @@ name: Security — Tier C (reusable)
 #     contents: read
 #
 # Tier C repos: rolliq-site, cashbucket-site, collective-expertise,
-#               workouts (until backend added), bpnz-newsletter, legal, operations
+#               workouts (MISCLASSIFIED — see below), bpnz-newsletter, legal, operations
+#
+# workouts is no longer a no-backend repo. chargingblindly-com/workouts#12 ("feat:
+# D1-backed workout history with offline sync", merged 2026-07-30) added a Cloudflare
+# Worker (src/index.js), a D1 database binding, and an in-Worker Cloudflare Access gate
+# (src/access-guard.js). It is still on Tier C — Gitleaks only, no Semgrep, no Trivy —
+# and that gap is real, not intentionally scoped. The old "(until backend added)" caveat
+# read as a condition still pending; it was met in Q3 2026 and the tier was never
+# revisited. Re-tiering is a live change to that repo's security.yml plus its main
+# ruleset's required checks, so it is NOT done here — it is a recommendation.
 
 permissions: {}
 

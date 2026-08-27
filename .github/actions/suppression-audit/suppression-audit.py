@@ -30,8 +30,11 @@ entries. Closes the issue automatically when there is nothing to act on.
 
 Exit codes:
   0 — nothing to act on, or only expiry findings. Expired suppressions already surface
-      naturally in PR reviews (adversarial-review.py drops them at load time), so they
-      stay informational.
+      naturally: both adversarial-review.py (PR-time) and capture.py (post-merge) drop
+      them at load time, so they stay informational. capture.py did NOT until 2026-08-27
+      — it ignored `expires` outright, so on any repo whose only consumer is
+      capture-findings (Tier C, and every Dependabot/fork merge) this line was false
+      and an expired entry suppressed forever.
   2 — at least one DEAD entry. This is a defect, not a diary date: the entry cannot do
       the job it claims to do, and nothing else in the system will ever say so. An issue
       nobody is paged by is how this class survived for as long as it did, so a proven
