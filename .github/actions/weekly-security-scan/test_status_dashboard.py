@@ -352,3 +352,18 @@ def test_all_three_degradations_at_once_keep_the_tables_well_formed():
     assert "2 of 2 open security issues counted by severity." in body
     for row in _source_rows(body):
         assert row.count("|") == 7, f"malformed row: {row!r}"
+
+
+def test_a_repo_with_no_open_issues_and_a_failed_scanner_is_not_rendered_as_clean():
+    """The sharpest form of the false all-clear: nothing is open, so there is nothing on the
+    page to look wrong, and "_No open `security`-labelled issues._" reads as a clean bill for
+    scanners that never ran. The table is rendered in that case so the marker has a row."""
+    quiet = scan.build_status_body("org/repo", "https://x", {})
+    degraded = scan.build_status_body(
+        "org/repo", "https://x", {}, unreported_sources={"gitleaks"}
+    )
+    assert "_No open `security`-labelled issues._" in quiet
+    assert "_No open `security`-labelled issues._" not in degraded
+    assert "did not report this run" in _row(degraded, "| Gitleaks")
+    for row in _source_rows(degraded):
+        assert row.count("|") == 7, f"malformed row: {row!r}"

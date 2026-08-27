@@ -1375,7 +1375,12 @@ def build_status_body(
         "### Open findings by source",
         "",
     ]
-    if not all_open:
+    # An empty table is replaced by a plain sentence — but only when the run has
+    # something to be clean ABOUT. With a scanner that did not report, "no open
+    # issues" is the sharpest form of the false all-clear (there is nothing else
+    # on the page to look wrong), so the table is rendered so its rows can carry
+    # the marker.
+    if not all_open and not unreported:
         lines.append("_No open `security`-labelled issues._")
     else:
         lines += [

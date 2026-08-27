@@ -81,7 +81,9 @@ class _FakeGitHub:
         self.labels_requested.append(label)
         if label in self.pages_of_100:
             return _FakeResponse([_issue(1000 + i, ["security"]) for i in range(100)])
-        return _FakeResponse(self.by_label.get(label, []) if params["page"] == 1 else [])
+        # The dashboard-issue lookup does not paginate, so `page` may be absent.
+        page = params.get("page", 1)
+        return _FakeResponse(self.by_label.get(label, []) if page == 1 else [])
 
 
 @pytest.fixture
@@ -271,3 +273,89 @@ def test_a_skipped_job_is_not_treated_as_a_degraded_run():
     having one — accuracy is the guard's safety property, not loudness."""
     expr = str(_scan_step(_reusable_yaml()["jobs"]["create-issues"])["with"]["run-degraded"])
     assert "skipped" not in expr
+
+
+# ── The call site: the renderer only knows what run_create_issues tells it ─────
+#
+# Defect 2 was not a renderer bug at all — `unreported` was computed, used to protect
+# auto-close, and then not passed four lines further down. Every renderer test above passes
+# that argument by hand, so all of them stay green with the call site's argument deleted.
+# These drive the real `run_create_issues()` end to end and read the dashboard body it
+# actually writes, which is the only layer where that omission is visible.
+
+
+@pytest.fixture
+def write_dashboard(monkeypatch, tmp_path, github):
+    """Run the real create-issues path and return the dashboard body it wrote.
+
+    Returns (body, closed_issue_numbers).
+    """
+    def _run(by_label: dict[str, list[dict]], env: dict[str, str] | None = None):
+        created: list[tuple[str, str]] = []
+        updated: list[str] = []
+        closed: list[int] = []
+
+        github(by_label)
+        monkeypatch.setattr(scan, "ensure_labels_exist", lambda *a, **k: None)
+        monkeypatch.setattr(scan, "close_issue", lambda _t, _r, n, _u: closed.append(n))
+        monkeypatch.setattr(
+            scan, "create_issue", lambda _t, _r, title, body, _l: created.append((title, body))
+        )
+        monkeypatch.setattr(
+            scan, "update_issue_body", lambda _t, _r, _n, body: updated.append(body)
+        )
+        monkeypatch.setattr(scan.time, "sleep", lambda _s: None)
+
+        monkeypatch.setenv("GITHUB_TOKEN", "x")
+        monkeypatch.setenv("REPO", "org/repo")
+        monkeypatch.setenv("RUN_URL", "https://github.com/org/repo/actions/runs/1")
+        monkeypatch.delenv("RUN_DEGRADED", raising=False)
+        # A semgrep artifact that exists, so exactly one scanner counts as having
+        # reported and the others are genuinely unreported.
+        artifact = tmp_path / "semgrep-findings.json"
+        artifact.write_text('{"results": []}', encoding="utf-8")
+        monkeypatch.setenv("SEMGREP_FINDINGS", str(artifact))
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+
+        scan.run_create_issues()
+
+        bodies = [b for t, b in created if t == scan.SECURITY_STATUS_TITLE] + updated
+        assert len(bodies) == 1, f"expected exactly one dashboard write, got {len(bodies)}"
+        return bodies[0], closed
+
+    return _run
+
+
+def test_the_scanners_that_did_not_report_are_marked_on_the_dashboard_it_writes(write_dashboard):
+    """The defect: this run knows Trivy and Gitleaks produced nothing — it already refuses to
+    auto-close their issues on that basis — and then wrote a dashboard that showed them as
+    clean. Semgrep, which did report, must be left unmarked."""
+    body, _ = write_dashboard({"security": [], "severity:high": []})
+    assert "did not report this run" in body, (
+        "the run knew which scanners produced nothing and rendered them as clean anyway"
+    )
+    assert "2 scanner(s) did not report this run" in body
+    marked = [l for l in body.splitlines() if l.startswith("|") and "did not report this run" in l]
+    named = {n for n in ("Gitleaks", "Trivy", "Semgrep") if any(n in l for l in marked)}
+    assert named == {"Gitleaks", "Trivy"}, f"wrong rows marked: {marked}"
+
+
+def test_the_dashboard_it_writes_says_when_the_run_itself_was_degraded(write_dashboard):
+    body, _ = write_dashboard({"security": []}, env={"RUN_DEGRADED": "true"})
+    assert "did not complete cleanly" in body
+
+
+def test_a_healthy_run_writes_no_degraded_banner(write_dashboard):
+    body, _ = write_dashboard({"security": []})
+    assert "did not complete cleanly" not in body
+
+
+def test_the_dashboard_it_writes_counts_an_issue_only_a_severity_label_finds(write_dashboard):
+    """End to end for the scope fix — and the guard that goes with it: the issue is counted by
+    the dashboard and is NOT closed, because nothing widened the set the close loop iterates."""
+    orphan = _issue(685, ["severity:critical"])
+    body, closed = write_dashboard({"security": [], "severity:critical": [orphan]})
+    assert "| 🔴 CRITICAL | 1 |" in body
+    assert "but not `security`" in body
+    assert closed == [], "an issue the scan never opened was closed by the widened fetch"
