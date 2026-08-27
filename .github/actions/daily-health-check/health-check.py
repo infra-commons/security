@@ -192,12 +192,36 @@ def get_job_logs(job_id: int, repo: str) -> str:
 
     The single-job endpoint responds with plain text; the ZIP branch is kept for
     the run-level shape (`/actions/runs/<id>/logs`) and for older API responses.
+
+    `--allow-escape-sequences` is MANDATORY, not tidiness. Since gh v2.97.0
+    (cli/cli 2a1409fe, "Add terminal-safety mechanisms for untrusted content",
+    2026-07-31) `gh api` REFUSES to write a response containing terminal escape
+    sequences without it: exit 1, zero bytes of stdout, "the response contains
+    terminal escape sequences; pass --allow-escape-sequences to output it
+    anyway". The refusal is not TTY-gated — it fires with stdout on a pipe,
+    which is exactly how this runs — and real CI logs are full of colour codes,
+    so from the moment the runner image picked up gh 2.97 this returned "" for
+    EVERY job in EVERY caller. Downstream that is silent, not loud: an empty log
+    means the diagnosis model sees an empty <workflow_log>, the
+    `_TRANSIENT_PATTERNS` scan matches nothing, `is_transient` can never become
+    true, and the re-run tier is dead — while the health-check run itself still
+    concludes `success`. Do not drop the flag.
+
+    A failed download is therefore announced on stderr rather than swallowed.
+    The return value is unchanged (""), but the reason is the only evidence
+    anyone gets that anything is wrong at all — the same argument `_gh_capture`
+    documents for `_pr_files_and_checks`.
     """
     result = subprocess.run(
-        ["gh", "api", f"/repos/{repo}/actions/jobs/{job_id}/logs"],
+        ["gh", "api", "--allow-escape-sequences",
+         f"/repos/{repo}/actions/jobs/{job_id}/logs"],
         capture_output=True,
     )
     if result.returncode != 0 or not result.stdout:
+        why = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        print(f"  Warning: could not download logs for job {job_id} "
+              f"(exit {result.returncode}, {len(result.stdout or b'')} bytes) — "
+              f"{why[:200] or 'gh produced no output and no error'}", file=sys.stderr)
         return ""
     try:
         with zipfile.ZipFile(io.BytesIO(result.stdout)) as zf:

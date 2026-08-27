@@ -205,7 +205,7 @@ def test_auto_close_is_per_client_so_one_clients_pass_cannot_close_anothers_issu
 def triage_harness(monkeypatch):
     """Drive triage_failed_runs with canned run lists, recording side effects."""
     state = {"failures": [], "successes": [], "open_issues": {},
-             "filed": [], "closed": []}
+             "filed": [], "closed": [], "reruns": []}
 
     def fake_collect(repo, status, cutoff):
         return list(state["failures"] if status == "failure" else state["successes"])
@@ -213,6 +213,8 @@ def triage_harness(monkeypatch):
     def fake_gh(*args, **kwargs):
         if args[:2] == ("issue", "close"):
             state["closed"].append(int(args[2]))
+        if args[:2] == ("run", "rerun"):
+            state["reruns"].append(args[2])
         return ""
 
     monkeypatch.setattr(hc, "_collect_runs", fake_collect)
@@ -360,6 +362,62 @@ def test_dry_run_neither_files_nor_closes(triage_harness):
     assert triage_harness["closed"] == []
 
 
+# ── Defect 5's second-order effect: the re-run tier could not fire ────────────
+#
+# What an empty log costs is not just a worse diagnosis. `_diagnose_fallback("")`
+# pattern-matches nothing, and the override in `triage_failed_runs` scans
+# `select_log_excerpt("", 30_000)` == "", so `is_transient` could only ever come
+# back true if the model INVENTED it from an empty <workflow_log>. Tier 1
+# (transient -> re-run) was therefore dead fleet-wide for as long as
+# `get_job_logs` returned "". These two pin both directions.
+#
+# Note what is NOT here: there is no attempt-count re-run guard in this action
+# (no `run_attempt` anywhere in health-check.py, action.yml or the reusable) --
+# Tier 1 is an unconditional `gh run rerun`. So the claim that a re-run guard
+# "went unexercised" has nothing to attach to; the tier itself is what never
+# fired.
+
+def _transient_blind_harness(monkeypatch, log):
+    """Point the harness at `log` with a diagnosis that says NOT transient.
+
+    That is the real shape: Haiku, shown nothing, does not volunteer
+    `is_transient`. The pattern-match override is the thing under test.
+    """
+    monkeypatch.setattr(hc, "get_job_logs", lambda job_id, repo: log)
+    monkeypatch.setattr(hc, "diagnose_with_claude", lambda *a, **k: {
+        "root_cause": "rc", "fix": "f", "severity": "high",
+        "is_transient": False, "mechanical": False})
+
+
+def test_the_transient_tier_cannot_fire_on_an_empty_log(triage_harness, monkeypatch):
+    _transient_blind_harness(monkeypatch, "")
+    triage_harness["failures"] = [
+        _run(1, STAGING_ROLLIQ_TEST, NOW - timedelta(hours=2))]
+
+    result = hc.triage_failed_runs("o/r", 25, "u", dry_run=False)
+
+    assert triage_harness["reruns"] == []
+    assert result["rerun"] == 0
+
+
+def test_the_transient_tier_fires_once_the_log_actually_arrives(triage_harness,
+                                                                monkeypatch):
+    # The same run, the same not-transient diagnosis -- the only thing that
+    # changed is that `get_job_logs` came back with the log.
+    _transient_blind_harness(
+        monkeypatch,
+        "2026-08-27T05:50:39Z \x1b[31mfatal: connection reset by peer\x1b[0m\n"
+        "2026-08-27T05:50:39Z ##[error]Process completed with exit code 1\n",
+    )
+    triage_harness["failures"] = [
+        _run(1, STAGING_ROLLIQ_TEST, NOW - timedelta(hours=2))]
+
+    result = hc.triage_failed_runs("o/r", 25, "u", dry_run=False)
+
+    assert triage_harness["reruns"] == ["1"]
+    assert result["rerun"] == 1
+
+
 # ── Defect 4: the diagnosis never saw the failure ─────────────────────────────
 #
 # Measured on the real job log behind
@@ -460,6 +518,91 @@ def test_get_job_logs_returns_the_log_WHOLE(monkeypatch):
     monkeypatch.setattr(hc.subprocess, "run", lambda *a, **k: _Result())
 
     assert hc.get_job_logs(1, "o/r") == DEPLOY_LOG
+
+
+# ── Defect 5: `gh api` refuses to emit a log containing escape sequences ──────
+#
+# gh v2.97.0 (cli/cli 2a1409fe, 2026-07-31) made `gh api` refuse to write a
+# response containing terminal escape sequences unless `--allow-escape-sequences`
+# is passed: exit 1, ZERO bytes of stdout. The refusal is NOT tty-gated — it
+# fires with stdout on a pipe, which is how the action invokes it — and real CI
+# logs are full of colour codes. Reproduced live against a *successful,
+# unrelated* job in this repo (infra-commons/security job 98423005563): 0 bytes
+# and exit 1 without the flag, 22 648 bytes and exit 0 with it. So from the day
+# the runner image picked up gh 2.97 this returned "" for every job in every
+# caller, fleet-wide, while every health-check run still concluded `success`.
+
+ESC_LOG = (
+    "2026-08-27T05:50:22.0672384Z Current runner version: '2.336.0'\n"
+    "2026-08-27T05:50:31.1000000Z \x1b[0;32mcollected 214 items\x1b[0m\n"
+    "2026-08-27T05:50:39.2000000Z \x1b[31mE   AssertionError\x1b[0m\n"
+    "2026-08-27T05:50:39.3000000Z ##[error]Process completed with exit code 1\n"
+)
+
+
+@pytest.fixture
+def gh_297(monkeypatch):
+    """A `subprocess.run` that behaves the way gh >= 2.97 actually behaves.
+
+    Refuses — exit 1, zero bytes — when the log carries an ESC byte and the
+    caller did not opt in. Anything less than this is not a reproduction: a fake
+    that always hands back the log passes just as happily against the unfixed
+    code, which is the negative control this file's header insists on.
+    """
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, returncode, stdout, stderr=b""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def fake_run(argv, *a, **k):
+        calls.append(list(argv))
+        if "\x1b" in ESC_LOG and "--allow-escape-sequences" not in argv:
+            return _Result(
+                1, b"",
+                b"the response contains terminal escape sequences; pass "
+                b"--allow-escape-sequences to output it anyway\n",
+            )
+        return _Result(0, ESC_LOG.encode("utf-8"))
+
+    monkeypatch.setattr(hc.subprocess, "run", fake_run)
+    return calls
+
+
+def test_a_job_log_with_escape_sequences_is_downloaded_not_dropped(gh_297):
+    # THE reproduction. Against the unfixed call this is "" — every downstream
+    # consumer (diagnosis, transient scan, auto-fix) then works from nothing.
+    assert hc.get_job_logs(98423005563, "infra-commons/security") == ESC_LOG
+
+
+def test_get_job_logs_passes_allow_escape_sequences(gh_297):
+    # Structural guard, same role as the WHOLE test above: an argv tidy-up must
+    # not be able to silently drop the flag and re-blind the whole fleet.
+    hc.get_job_logs(1, "o/r")
+
+    assert gh_297 == [["gh", "api", "--allow-escape-sequences",
+                       "/repos/o/r/actions/jobs/1/logs"]]
+
+
+def test_a_failed_log_download_is_announced_not_silent(monkeypatch, capsys):
+    """An empty return is invisible; a run that diagnoses nothing still exits 0.
+
+    This outage went a month unnoticed precisely because the failure said
+    nothing. The decision is unchanged (still ""), but gh's own reason now
+    reaches stderr — the argument `_gh_capture` already makes for
+    `_pr_files_and_checks`.
+    """
+    class _Denied:
+        returncode = 1
+        stdout = b""
+        stderr = b"gh: Not Found (HTTP 404)\n"
+
+    monkeypatch.setattr(hc.subprocess, "run", lambda *a, **k: _Denied())
+
+    assert hc.get_job_logs(42, "o/r") == ""
+    err = capsys.readouterr().err
+    assert "job 42" in err
+    assert "Not Found (HTTP 404)" in err
 
 
 def test_zip_entries_are_ordered_naturally_so_step_10_follows_step_2():
