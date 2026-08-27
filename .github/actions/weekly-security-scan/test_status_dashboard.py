@@ -193,3 +193,162 @@ def test_missing_source_label_renders_its_own_warning_distinct_from_severity():
     assert "1 of 1 open security issues counted by severity." in body  # severity IS attributed
     assert "could not be matched to a recognised `severity:` label" not in body
     assert "1 issue(s) have no recognised `source:` label" in body
+
+
+# ── A degraded run must not render as a healthy one ────────────────────────────
+#
+# Three separate paths let a *degraded* run render identically to a clean one, which is the
+# same class of fail-open as #96 above: the dashboard is read at a glance, so a number that
+# cannot be distinguished from a healthy number IS a false all-clear.
+#
+#   1. the run writing the dashboard failed           -> `run_degraded`
+#   2. a scanner produced no artifact this run        -> `unreported_sources`
+#   3. an issue carries a severity but not `security` -> counted, and called out
+#
+# Every test below asserts BOTH directions — the degraded render differs, and the healthy
+# render is untouched — because a banner that fires on the healthy case is one operators
+# learn to override, which disarms it just as thoroughly as never firing at all.
+
+
+def _row(body: str, prefix: str) -> str:
+    rows = [l for l in body.splitlines() if l.startswith(prefix)]
+    assert rows, f"expected a row starting {prefix!r} in:\n{body}"
+    return rows[0]
+
+
+def _source_rows(body: str) -> list[str]:
+    section = body.split("### Open findings by source", 1)[1].split("### Quick links", 1)[0]
+    return [
+        l for l in section.splitlines()
+        if l.startswith("|") and l != "| Source | CRITICAL | HIGH | MEDIUM | LOW | OTHER |"
+        and not l.startswith("|---")
+    ]
+
+
+# ── 1. The run that wrote the dashboard failed ─────────────────────────────────
+
+def test_a_degraded_run_says_so_above_the_first_number():
+    """Both callers run under `if: always()`, so the dashboard-writing job writes just as
+    happily on a run where every scanner job above it failed. The banner has to sit above the
+    severity table: a reader who takes only the headline numbers must not be able to miss it."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    body = scan.build_status_body("org/repo", "https://x", all_open, run_degraded=True)
+    lines = body.splitlines()
+    banner = [i for i, l in enumerate(lines) if "did not complete cleanly" in l]
+    heading = [i for i, l in enumerate(lines) if l == "### Open findings by severity"]
+    assert banner, f"no degraded banner rendered in:\n{body}"
+    assert banner[0] < heading[0], "the degraded banner renders below the severity table"
+
+
+def test_a_healthy_run_carries_no_degraded_banner():
+    """The other direction, and the reason `run_degraded` defaults to False: a banner on every
+    run is worth exactly as much as no banner."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    for body in (
+        scan.build_status_body("org/repo", "https://x", all_open),
+        scan.build_status_body("org/repo", "https://x", all_open, run_degraded=False),
+    ):
+        assert "did not complete cleanly" not in body
+
+
+def test_the_degraded_banner_is_distinct_from_the_page_cap_warning():
+    """Two different degradations, two different sentences — an operator must be able to tell
+    'the run broke' from 'the issue list was truncated' without reading the workflow logs."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    degraded = scan.build_status_body("org/repo", "https://x", all_open, run_degraded=True)
+    capped = scan.build_status_body("org/repo", "https://x", all_open, truncated=True)
+    assert "hit the API page cap" not in degraded
+    assert "did not complete cleanly" not in capped
+
+
+# ── 2. A scanner that did not report is not a scanner that found nothing ───────
+
+def test_a_scanner_that_did_not_report_is_not_rendered_as_clean():
+    """The defect: `run_create_issues` already computes `unreported` and uses it to protect
+    auto-close, but never passed it here — so a failed Gitleaks read rendered the same all-zero
+    row as a Gitleaks run that scanned cleanly. Zero must not mean both 'nothing found' and
+    'nothing measured'."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    clean = scan.build_status_body("org/repo", "https://x", all_open)
+    degraded = scan.build_status_body(
+        "org/repo", "https://x", all_open, unreported_sources={"gitleaks"}
+    )
+    assert _row(clean, "| Gitleaks") != _row(degraded, "| Gitleaks"), (
+        "a scanner that produced no artifact renders identically to one that reported clean"
+    )
+    assert "did not report this run" in _row(degraded, "| Gitleaks")
+    assert "1 scanner(s) did not report this run: Gitleaks" in degraded
+    assert "not measured" in degraded
+
+
+def test_a_reporting_scanner_row_is_untouched_when_another_did_not_report():
+    """Behaviour-preservation control, and the per-source half of the rule: the marker must land
+    on the scanner that failed and on nothing else."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    clean = scan.build_status_body("org/repo", "https://x", all_open)
+    degraded = scan.build_status_body(
+        "org/repo", "https://x", all_open, unreported_sources={"gitleaks"}
+    )
+    assert _row(clean, "| Semgrep") == _row(degraded, "| Semgrep")
+    assert "did not report" not in _row(degraded, "| Semgrep")
+
+
+def test_an_unreported_scanner_with_no_open_issues_still_gets_a_marked_row():
+    """The case where the warning matters most: nothing else on the page looks wrong, because
+    the scanner has no open issues at all. A source outside the pre-seeded five (it can be any
+    string the caller passes) must still be given a row to carry the marker."""
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    body = scan.build_status_body(
+        "org/repo", "https://x", all_open, unreported_sources={"pentest"}
+    )
+    row = _row(body, "| Pentest")
+    assert "did not report this run" in row
+    assert row.count("|") == 7, f"marked row is not a well-formed table row: {row!r}"
+
+
+def test_no_unreported_sources_renders_no_scanner_warning():
+    all_open = {"a": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    for kwargs in ({}, {"unreported_sources": set()}, {"unreported_sources": None}):
+        body = scan.build_status_body("org/repo", "https://x", all_open, **kwargs)
+        assert "did not report this run" not in body
+
+
+# ── 3. A severity-labelled issue with no `security` label ──────────────────────
+
+def test_an_issue_with_a_severity_but_no_security_label_is_counted_and_flagged():
+    """Nothing enforces that a producer applies `security`, so an open severity:high issue can
+    be invisible to every `label:security` query — including the dashboard's own. It is counted
+    here, and the missing label is named rather than silently absorbed."""
+    all_open = {"1": _issue(1, ["severity:high"])}
+    body = scan.build_status_body("org/repo", "https://x", all_open)
+    assert "| 🟠 HIGH | 1 |" in body
+    assert "1 of 1 open security issues counted by severity." in body
+    assert "carry a recognised `severity:` label but not `security`" in body
+    assert "-label%3Asecurity" in body, "no quick link to the issues missing the label"
+
+
+def test_a_properly_labelled_issue_does_not_trip_the_missing_label_warning():
+    all_open = {"1": _issue(1, ["security", "severity:high", "source:semgrep"])}
+    body = scan.build_status_body("org/repo", "https://x", all_open)
+    assert "but not `security`" not in body
+
+
+def test_all_three_degradations_at_once_keep_the_tables_well_formed():
+    """They are independent signals and can co-occur — a failed run whose Gitleaks job died and
+    whose repo has a mislabelled issue. Each must render, and the Markdown must survive it."""
+    all_open = {
+        "1": _issue(1, ["security", "severity:high", "source:semgrep"]),
+        "2": _issue(2, ["severity:critical"]),
+    }
+    body = scan.build_status_body(
+        "org/repo", "https://x", all_open,
+        truncated=True, unreported_sources={"gitleaks"}, run_degraded=True,
+    )
+    assert "did not complete cleanly" in body
+    assert "did not report this run" in body
+    assert "but not `security`" in body
+    assert "hit the API page cap" in body
+    assert "| 🔴 CRITICAL | 1 |" in body and "| 🟠 HIGH | 1 |" in body
+    assert "2 of 2 open security issues counted by severity." in body
+    for row in _source_rows(body):
+        assert row.count("|") == 7, f"malformed row: {row!r}"
