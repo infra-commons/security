@@ -231,3 +231,110 @@ def test_the_quota_recorder_has_no_unlabeled_fallback():
         "the next run's label-gated lookup only by luck, not by design — see "
         "this test's comment for why that's the wrong failure mode here"
     )
+
+
+# ── every `gh` call must name the repo explicitly ─────────────────────────────
+#
+# infra-commons/meta#1092/#1094 (2026-08-27): the quota recorder failed with
+# `could not add label: 'security:quota-exhausted' not found`, no tracking issue
+# was ever filed, and the gate therefore never converged on "marker open →
+# block" — every subsequent run repeated the same broken attempt.
+#
+# The cause was one missing flag. The `gate` job has NO `actions/checkout` step
+# (it does not need the source — it reads job outputs and files issues), so
+# GITHUB_WORKSPACE is an empty directory. `gh` resolves its target repo from
+# `--repo`, then `GH_REPO`, then the git remotes of the working directory; with
+# no flag, no `GH_REPO` in this job's env, and no checkout, it finds none and
+# dies with "not a git repository". On the `gh label create` calls that error
+# was swallowed by their trailing `|| true` (correct on its own terms — a label
+# that already exists must not fail the step), so the label was silently never
+# created and the *next* command, `gh issue create --label "$LABEL"`, failed on
+# a label that nothing had provisioned.
+#
+# Every other `gh` call in these steps already passed `--repo "$REPO"`; the
+# three label creates were the only ones that did not, which is why this read as
+# a permissions or provisioning problem rather than the one-flag omission it was.
+#
+# This is asserted over every `gh`-using step rather than a fixed list, so a
+# step added later is covered without anyone remembering to extend this test.
+
+_GH_CALL_RE = re.compile(r"\bgh\s+[a-z]")
+_REPO_FLAG_RE = re.compile(r'--repo\s+"\$\{?REPO\}?"')
+
+
+def _shell_code(run: str) -> str:
+    """`run:` text with whole-line shell comments removed.
+
+    The comments in these steps quote the commands they explain (`gh issue
+    create` appears in prose in two of them), so counting `gh` invocations over
+    the raw text over-counts and the assertion below would be unfalsifiable.
+    """
+    return "\n".join(
+        line for line in run.splitlines() if not line.strip().startswith("#")
+    )
+
+
+def _gh_steps():
+    steps = _load(_WORKFLOW)["jobs"]["gate"]["steps"]
+    found = [s for s in steps if _GH_CALL_RE.search(_shell_code(str(s.get("run", ""))))]
+    assert len(found) >= 4, (
+        f"only {len(found)} `gh`-using gate steps discovered — the lookup, the two "
+        f"recorders and the critical-findings step are all expected, so this "
+        f"test has stopped covering what it was written to cover"
+    )
+    return found
+
+
+@pytest.mark.parametrize("step", _gh_steps(), ids=lambda s: s["name"])
+def test_every_gh_call_in_the_gate_job_names_the_repo_explicitly(step):
+    code = _shell_code(str(step["run"]))
+    calls = len(_GH_CALL_RE.findall(code))
+    flagged = len(_REPO_FLAG_RE.findall(code))
+    assert calls == flagged, (
+        f"{step['name']!r} makes {calls} `gh` call(s) but only {flagged} pass "
+        f'--repo "$REPO". The gate job never checks out, so a bare `gh` has no '
+        f"git remote to infer a repo from and fails with 'not a git repository' "
+        f"— behind `|| true` that failure is silent (infra-commons/meta#1092)"
+    )
+
+
+# Nothing else asserts these calls exist at all. Without them the gate depends on
+# each of 13+ caller repos having been given the label by hand, which is exactly
+# the state that produced #1092 — and the failure is invisible until a provider's
+# budget actually lapses, which may be months after the regression lands.
+@pytest.mark.parametrize("step_name", [
+    "Record that the provider quota is exhausted",
+    "Record a degraded pass",
+    "Create tracking issue for critical findings",
+])
+def test_each_recording_step_provisions_its_own_label(step_name):
+    code = _shell_code(_step_run(step_name))
+    assert 'gh label create "$LABEL" --repo "$REPO"' in code, (
+        f"{step_name!r} does not self-provision its label against $REPO — the "
+        f"labelled `gh issue create` below it then fails in any caller repo that "
+        f"has never been given the label by hand"
+    )
+    assert "--force" in code, (
+        f"{step_name!r}'s label create is not idempotent; without --force it "
+        f"errors on the second run in every repo that already has the label"
+    )
+
+
+# The safe-direction behaviour of `test_the_quota_recorder_has_no_unlabeled_fallback`
+# is kept, but it must not be *opaque*: in #1092 the job reported FAILURE with a
+# bare `could not add label` and nothing said that blocking was deliberate or
+# what would clear it, which is what sent the first investigation at the fallback
+# the sibling step uses (that fallback would have re-opened #81's fail-open).
+def test_the_quota_recorders_hard_fail_path_says_why_it_is_failing():
+    code = _shell_code(_step_run("Record that the provider quota is exhausted"))
+    assert code.count("gh issue create") == 1, (
+        "the hard-fail path must stay a hard fail — see "
+        "test_the_quota_recorder_has_no_unlabeled_fallback for why an unlabeled "
+        "fallback here is worse than the failure it would hide"
+    )
+    assert "::error::" in code, (
+        "the create's failure branch emits no ::error:: annotation, so the step "
+        "fails the required check with no statement of what failed or why it "
+        "does not fall back"
+    )
+    assert "exit 1" in code, "the failure branch must still fail the step"

@@ -282,7 +282,19 @@ jobs:
           # label that already exists). Its failure must not stop the create
           # below from being attempted — a repo that already has this label
           # (e.g. from a prior run) must not depend on this call succeeding.
-          gh label create "$LABEL" --color D93F0B \
+          #
+          # `--repo "$REPO"` is load-bearing, not decoration: this job has no
+          # `actions/checkout`, so `gh` has no git remote to infer a target from
+          # and (with no GH_REPO in this step's env) dies with "not a git
+          # repository". The `|| true` above then swallows that error, the label
+          # is never created, and the labelled issue-create below fails with
+          # `could not add label: '<label>' not found` — a message that reads
+          # like a provisioning or permissions problem in the caller repo and is
+          # neither. That was infra-commons/meta#1092/#1094 (2026-08-27), where
+          # the quota marker was never filed at all, so the next run's lookup
+          # found nothing open and the escalation never converged. Asserted by
+          # test_every_gh_call_in_the_gate_job_names_the_repo_explicitly.
+          gh label create "$LABEL" --repo "$REPO" --color D93F0B \
             --description "Applied only by the adversarial-review gate's own token. Both the dedupe below and the next run's lookup depend on an issue's author being unable to attach this themselves." \
             --force >/dev/null 2>&1 || true
 
@@ -299,7 +311,16 @@ jobs:
             "Unlike a rate limit, this does not clear by itself. **While this issue is open, further PRs will be BLOCKED** rather than merged unreviewed — that is deliberate: the first change is not held up, the tenth is not shipped unreviewed." \
             "**To restore review:** top up the provider account or raise its spend cap, confirm a review runs, then close this issue. Closing it re-arms the one-time pass." \
             "_Created automatically by the \`adversarial-review / gate\` workflow._")
-          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY" --label "$LABEL"
+          # NOTE: deliberately no unlabeled-fallback create here — see this
+          # step's header comment above. The annotation exists so that when this
+          # step does fail, the job says which failure it was (the label could
+          # not be applied vs. the issue could not be created) and that blocking
+          # is the designed response, rather than leaving a bare `gh` error on a
+          # required check for someone to guess at.
+          gh issue create --repo "$REPO" --title "${TITLE}" --body "$BODY" --label "$LABEL" || {
+            echo "::error::Could not file the quota-exhausted tracking issue with the ${LABEL} label on ${REPO}. This step has NO unlabeled fallback by design: an unlabeled issue is invisible to the label-gated lookup on the next run, which would silently revert this gate to fail-open for the rest of the billing period (infra-commons/security#81). Blocking this PR is the safe direction. Check that this job's token has issues:write on ${REPO} and that the label create above succeeded."
+            exit 1
+          }
 
       # A degraded pass renders in the checks UI exactly like a full pass, so
       # without a durable record nobody learns that a merge happened on fewer
@@ -358,7 +379,7 @@ jobs:
           # Best-effort and idempotent (--force updates rather than errors on a
           # label that already exists). Its failure must never block the durable
           # record below — see the fallback `gh issue create` at the bottom.
-          gh label create "$LABEL" --color 5319E7 \
+          gh label create "$LABEL" --repo "$REPO" --color 5319E7 \
             --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
             --force >/dev/null 2>&1 || true
 
@@ -396,7 +417,7 @@ jobs:
           LABEL="security:critical-findings"
           TITLE="[security] Critical findings on PR #${PR_NUMBER}"
 
-          gh label create "$LABEL" --color B60205 \
+          gh label create "$LABEL" --repo "$REPO" --color B60205 \
             --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
             --force >/dev/null 2>&1 || true
 
