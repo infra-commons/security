@@ -177,7 +177,7 @@ jobs:
         # `security-scan.py` imports httpx at module scope, so importing the module
         # under test needs it even though every network call is monkeypatched out.
         # `anthropic`/`openai` are only imported lazily inside call_claude()/
-        # call_gpt4o(), so no test needed them installed until security#815 added
+        # call_openai(), so no test needed them installed until security#815 added
         # direct coverage for their truncation guards (mirrors the identical gap
         # fixed for adversarial-review/capture-findings in the same sweep).
         # `pyyaml` is test-only, same as the sibling jobs above: the tests parse

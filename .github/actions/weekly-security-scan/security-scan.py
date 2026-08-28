@@ -404,6 +404,24 @@ Rules:
 
 # ── LLM calls ─────────────────────────────────────────────────────────────────
 
+# The model pins, named ONCE. They were previously inline literals repeated in each
+# provider's `create()` call and again in the two RuntimeError messages that report a
+# failed scan — so a bump had four edit sites per provider and a missed one produced an
+# error message naming a model the code no longer calls. Every one of those repeats was
+# reported as a separate "stale pin" by the weekly model-freshness check, which is a fair
+# reading: an error string that names the wrong model is wrong.
+_ANTHROPIC_MODEL = "claude-sonnet-5"
+
+# Sol rather than Terra, operator's call (2026-08-28), on two grounds. This is a security
+# scan, so a missed finding is the expensive direction and the reasoning-strongest model in
+# the tier is the right default — a weekly job's token cost is not the constraint worth
+# optimising against a CRITICAL nobody saw. And Sol is already proven deployed on the
+# reference-check staging surface, where Terra is a catalog entry this fleet has never
+# actually run: no `gpt-5.6-*` pin exists anywhere in the other 43 repos (measured
+# 2026-08-28 via model-freshness.py), so this is the fleet's first, and a model with a live
+# deployment behind it is the safer first.
+_OPENAI_MODEL = "gpt-5.6-sol"
+
 # Only alphanumeric characters and spaces survive into a system-prompt hint.
 # The suppression `reason` field is user-authored free text — injecting it
 # verbatim would let a crafted reason embed directives into the trusted system
@@ -456,7 +474,7 @@ def call_claude(api_key: str, chunk: str, codebase: str, suppression_context: st
         "Return a JSON object only — no other text."
     )
     msg = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=_ANTHROPIC_MODEL,
         max_tokens=4096,
         system=system,
         messages=[{"role": "user", "content": user}],
@@ -472,18 +490,18 @@ def call_claude(api_key: str, chunk: str, codebase: str, suppression_context: st
     # guard in adversarial-review.py's call_anthropic()/call_openai().
     if not content or not content.strip():
         raise RuntimeError(
-            f"claude-sonnet-4-6 returned an empty completion (stop_reason="
+            f"{_ANTHROPIC_MODEL} returned an empty completion (stop_reason="
             f"{msg.stop_reason!r}) — scan did not run; not treating as clean."
         )
     if msg.stop_reason == "max_tokens":
         raise RuntimeError(
-            "claude-sonnet-4-6 hit the token budget before finishing the scan "
+            f"{_ANTHROPIC_MODEL} hit the token budget before finishing the scan "
             "(stop_reason='max_tokens') — findings may be truncated; not treating as clean."
         )
     return content
 
 
-def call_gpt4o(api_key: str, chunk: str, codebase: str, suppression_context: str = "") -> str:
+def call_openai(api_key: str, chunk: str, codebase: str, suppression_context: str = "") -> str:
     from openai import OpenAI
 
     # 300 s timeout prevents cost exhaustion on unexpectedly large codebases.
@@ -500,8 +518,18 @@ def call_gpt4o(api_key: str, chunk: str, codebase: str, suppression_context: str
         "Return a JSON object only — no other text."
     )
     resp = client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=4096,
+        model=_OPENAI_MODEL,
+        # `max_completion_tokens`, NOT `max_tokens`, and this is load-bearing rather than
+        # tidying: reasoning models reject `max_tokens` outright with a 400, so leaving it
+        # in place while bumping the pin off gpt-4o would break every openai-provider scan
+        # on the first run. They also count internal reasoning tokens against this budget,
+        # so it must be far larger than the ~4k of visible JSON we actually want back or
+        # reasoning consumes the whole allowance and the content returns empty — which the
+        # guard below would then correctly, and permanently, raise on.
+        #
+        # Same change adversarial-review.py already carries for the same reason; this file
+        # kept `max_tokens=4096` only because gpt-4o is not a reasoning model.
+        max_completion_tokens=16384,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -514,12 +542,12 @@ def call_gpt4o(api_key: str, chunk: str, codebase: str, suppression_context: str
     # NOT read as "no findings." Raise instead of returning garbage to the parser.
     if not content or not content.strip():
         raise RuntimeError(
-            f"gpt-4o returned an empty completion (finish_reason="
+            f"{_OPENAI_MODEL} returned an empty completion (finish_reason="
             f"{choice.finish_reason!r}) — scan did not run; not treating as clean."
         )
     if choice.finish_reason == "length":
         raise RuntimeError(
-            "gpt-4o hit the token budget before finishing the scan "
+            f"{_OPENAI_MODEL} hit the token budget before finishing the scan "
             "(finish_reason='length') — findings may be truncated; not treating as clean."
         )
     return content
@@ -1467,7 +1495,7 @@ def run_ai_review() -> None:
         if not api_key:
             print("ERROR: OPENAI_API_KEY is required", file=sys.stderr)
             sys.exit(2)
-        raw = call_gpt4o(api_key, chunk, codebase, suppression_context)
+        raw = call_openai(api_key, chunk, codebase, suppression_context)
         source_label = "adversarial-ai"
     else:
         print(f"ERROR: LLM_PROVIDER must be 'anthropic' or 'openai', got {provider!r}", file=sys.stderr)

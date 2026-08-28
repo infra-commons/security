@@ -1,6 +1,6 @@
 """A truncated or empty AI-review completion must not be treated as a clean scan.
 
-infra-commons/security#815: `call_claude()`/`call_gpt4o()` had no `stop_reason`/
+infra-commons/security#815: `call_claude()`/`call_openai()` had no `stop_reason`/
 `finish_reason` guard at all — unlike `adversarial-review.py`'s `call_openai()`,
 which already raises on an empty completion or `finish_reason == "length"` with
 the comment "An empty or truncated completion must NOT read as 'no findings':
@@ -80,8 +80,10 @@ class _FakeOpenAIChoice:
 class _FakeOpenAICompletions:
     def __init__(self, choice):
         self._choice = choice
+        self.last_kwargs: dict = {}
 
     def create(self, **kwargs):
+        self.last_kwargs = kwargs
         return SimpleNamespace(choices=[self._choice])
 
 
@@ -90,21 +92,42 @@ class _FakeOpenAIClient:
         self.chat = SimpleNamespace(completions=_FakeOpenAICompletions(choice))
 
 
-def test_call_gpt4o_raises_on_length_truncation(monkeypatch):
+def test_call_openai_raises_on_length_truncation(monkeypatch):
     choice = _FakeOpenAIChoice('{"findings": [{"severity": "critical"', "length")
     monkeypatch.setattr(openai, "OpenAI", lambda **kw: _FakeOpenAIClient(choice))
     with pytest.raises(RuntimeError, match="finish_reason='length'"):
-        scan.call_gpt4o("key", "app", "codebase")
+        scan.call_openai("key", "app", "codebase")
 
 
-def test_call_gpt4o_raises_on_empty_completion(monkeypatch):
+def test_call_openai_raises_on_empty_completion(monkeypatch):
     choice = _FakeOpenAIChoice(None, "content_filter")
     monkeypatch.setattr(openai, "OpenAI", lambda **kw: _FakeOpenAIClient(choice))
     with pytest.raises(RuntimeError, match="empty completion"):
-        scan.call_gpt4o("key", "app", "codebase")
+        scan.call_openai("key", "app", "codebase")
 
 
-def test_call_gpt4o_returns_content_on_a_clean_completion(monkeypatch):
+def test_call_openai_returns_content_on_a_clean_completion(monkeypatch):
     choice = _FakeOpenAIChoice('{"findings": []}', "stop")
     monkeypatch.setattr(openai, "OpenAI", lambda **kw: _FakeOpenAIClient(choice))
-    assert scan.call_gpt4o("key", "app", "codebase") == '{"findings": []}'
+    assert scan.call_openai("key", "app", "codebase") == '{"findings": []}'
+
+
+def test_call_openai_never_sends_max_tokens(monkeypatch):
+    """Reasoning models reject `max_tokens` outright with a 400.
+
+    This file's OpenAI call carried `max_tokens=4096` for as long as the pin was
+    `gpt-4o`, which is not a reasoning model. Bumping the pin without moving to
+    `max_completion_tokens` would have 400'd every openai-provider scan on the first
+    run — so this is the regression test for the parameter, not for the pin.
+
+    The budget must also be far larger than the visible output wanted, because internal
+    reasoning tokens are charged against it; a too-small budget returns empty content,
+    which the guards above would then correctly and permanently raise on."""
+    client = _FakeOpenAIClient(_FakeOpenAIChoice('{"findings": []}', "stop"))
+    monkeypatch.setattr(openai, "OpenAI", lambda **kw: client)
+    scan.call_openai("key", "app", "codebase")
+
+    sent = client.chat.completions.last_kwargs
+    assert "max_tokens" not in sent, "reasoning models 400 on max_tokens"
+    assert sent["max_completion_tokens"] >= 16384
+    assert sent["model"] == scan._OPENAI_MODEL
