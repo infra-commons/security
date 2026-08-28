@@ -411,7 +411,16 @@ Rules:
 # reported as a separate "stale pin" by the weekly model-freshness check, which is a fair
 # reading: an error string that names the wrong model is wrong.
 _ANTHROPIC_MODEL = "claude-sonnet-5"
-_OPENAI_MODEL = "gpt-5.6-terra"
+
+# Sol rather than Terra, operator's call (2026-08-28), on two grounds. This is a security
+# scan, so a missed finding is the expensive direction and the reasoning-strongest model in
+# the tier is the right default — a weekly job's token cost is not the constraint worth
+# optimising against a CRITICAL nobody saw. And Sol is already proven deployed on the
+# reference-check staging surface, where Terra is a catalog entry this fleet has never
+# actually run: no `gpt-5.6-*` pin exists anywhere in the other 43 repos (measured
+# 2026-08-28 via model-freshness.py), so this is the fleet's first, and a model with a live
+# deployment behind it is the safer first.
+_OPENAI_MODEL = "gpt-5.6-sol"
 
 # Only alphanumeric characters and spaces survive into a system-prompt hint.
 # The suppression `reason` field is user-authored free text — injecting it
