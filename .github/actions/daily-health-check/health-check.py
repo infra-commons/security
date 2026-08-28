@@ -46,8 +46,14 @@ except ImportError:
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
+# From the 4.6 generation on, Claude model IDs are dateless — the dateless ID IS the
+# pinned snapshot. A `<name>-<date>` ID is only valid for 4.5 and earlier, which is why
+# `_AUTOFIX_MODEL` was wrong: `claude-sonnet-4-6-20250514` spliced the 4.6 name onto Claude
+# Sonnet 4's release date (`claude-sonnet-4-20250514`, retired 2026-06-15). No such model
+# has ever existed, and it appears in neither the provider's current roster nor its
+# deprecation table, which lists recently-retired models too.
 _TRIAGE_MODEL  = "claude-haiku-4-5-20251001"   # Fast, cheap diagnosis
-_AUTOFIX_MODEL = "claude-sonnet-4-6-20250514"  # More capable for generating fixes
+_AUTOFIX_MODEL = "claude-sonnet-5"             # More capable for generating fixes
 
 _LABEL_HEALTH    = "source:health-check"
 _LABEL_WF_FAIL   = "workflow-failure"
