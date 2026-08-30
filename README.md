@@ -8,8 +8,8 @@ Canonical security workflows shared across all entity orgs (rolliq-com, cashbuck
 
 Runs an adversarial AI security review on every PR diff. Supports two independent model families:
 
-- **Claude** (Anthropic, `claude-sonnet-4-6`) — always runs.
-- **OpenAI** (`gpt-5.5-2026-04-23`) — optional; enabled per-caller with `run-openai: true`. Requires `OPENAI_API_KEY` org secret.
+- **Claude** (Anthropic, `claude-sonnet-5`) — always runs.
+- **OpenAI** (`gpt-5.6-terra`) — optional; enabled per-caller with `run-openai: true`. Requires `OPENAI_API_KEY` org secret.
 
 The gate job blocks merge if either enabled reviewer finds a CRITICAL finding and opens a tracking issue in the caller's repo.
 
