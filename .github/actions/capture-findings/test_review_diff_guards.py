@@ -70,3 +70,49 @@ def test_review_diff_truncated_completion_raises(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="token budget"):
         capture.review_diff("k", "diff", "ctx", "")
+
+
+# ── Thinking-block responses (2026-08-31) ───────────────────────────────────────
+#
+# claude-sonnet-5 returns a ThinkingBlock FIRST, and it has no `.text`, so the
+# previous `content[0].text` raised `AttributeError: 'ThinkingBlock' object has
+# no attribute 'text'`. That took capture-findings down at every caller two
+# minutes after the moving tag delivered the model swap, and the same idiom was
+# live in three other composites here. Thinking is not emitted on every call, so
+# it presents as flakiness rather than as a break — which is why the regression
+# is pinned explicitly rather than left to the empty-completion guard above to
+# catch incidentally.
+
+
+def _thinking_block(text="deliberating"):
+    """Shaped like the SDK's ThinkingBlock: carries `.thinking`, never `.text`."""
+    return SimpleNamespace(type="thinking", thinking=text)
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def test_review_diff_reads_past_a_leading_thinking_block(monkeypatch):
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[_thinking_block(), _text_block('{"findings": []}')],
+    )
+    assert "findings" in capture.review_diff("k", "diff", "ctx", "")
+
+
+def test_review_diff_joins_text_split_across_blocks(monkeypatch):
+    # Taking the first text block rather than joining would silently truncate the
+    # review, and a shorter findings list reads as a cleaner diff — not an error.
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[_thinking_block(), _text_block('{"find'), _text_block('ings": []}')],
+    )
+    assert capture.review_diff("k", "diff", "ctx", "") == '{"findings": []}'
+
+
+def test_review_diff_raises_when_the_response_is_thinking_only(monkeypatch):
+    # Fail closed: no text block at all must not read as "reviewed, nothing found".
+    _fake_anthropic(monkeypatch, content_blocks=[_thinking_block()])
+    with pytest.raises(RuntimeError, match="empty completion"):
+        capture.review_diff("k", "diff", "ctx", "")
