@@ -52,6 +52,15 @@ GITHUB_API = "https://api.github.com"
 SUPPRESSIONS_PATH = Path(".github/adversarial-review-suppressions.yml")
 CANONICAL_FILENAME = "adversarial-review-suppressions.yml"
 PLATFORM_IAC_REPO = "infra-commons/security"
+# The model pin, named ONCE. It was previously an inline literal in `create()` and
+# repeated in the two RuntimeError messages that report a failed review — three edit
+# sites, where a missed one produces an error string naming a model the code no longer
+# calls. weekly-security-scan.py:405 adopted this same shape after the same problem.
+#
+# MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`), the default
+# for scan and review jobs.
+_ANTHROPIC_MODEL = "claude-sonnet-5"
+
 MAX_DIFF_CHARS = 80_000
 MAX_SUPPRESSIONS_BYTES = 256_000  # ~4x current file size; bounds runner memory pre-parse
 ALLOWED_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
@@ -588,7 +597,7 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
         timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=10.0),
     )
     msg = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=_ANTHROPIC_MODEL,
         max_tokens=4096,
         system=SYSTEM_PROMPT + suppression_context,
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
@@ -602,12 +611,12 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
     # a truncated review fails the job rather than silently clearing it.
     if not content or not content.strip():
         raise RuntimeError(
-            "claude-sonnet-4-6 returned an empty completion (stop_reason="
+            f"{_ANTHROPIC_MODEL} returned an empty completion (stop_reason="
             f"{msg.stop_reason!r}) — review did not run; not treating as clean."
         )
     if msg.stop_reason == "max_tokens":
         raise RuntimeError(
-            "claude-sonnet-4-6 hit the token budget before finishing the review "
+            f"{_ANTHROPIC_MODEL} hit the token budget before finishing the review "
             "(stop_reason='max_tokens') — findings may be truncated; not treating as clean."
         )
     return content
