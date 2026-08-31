@@ -193,7 +193,7 @@ jobs:
         run: python -m pytest .github/actions/weekly-security-scan -q
 
   composite-release:
-    name: composite release tooling unit tests
+    name: composite release tooling + manifest validity unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -213,4 +213,12 @@ jobs:
         run: pip install pytest==8.3.4
 
       - name: Run tests
+        # Also runs `test_action_manifests.py`, which is the static validation of
+        # `.github/actions/*/action.yml` that `workflow-lint.yml` structurally cannot
+        # provide: actionlint's project mode deliberately skips composite manifests
+        # (see that workflow's header), so until infra-commons/meta#1162 nothing
+        # checked them at all — and a manifest expression naming a workflow-only
+        # context is a hard "Failed to load ... action.yml" for every caller, at
+        # `Set up job`, delivered through a moving tag with no caller PR to catch it.
+        # The two checks are a pair, not a duplication: workflows there, manifests here.
         run: python -m pytest .github/scripts -q

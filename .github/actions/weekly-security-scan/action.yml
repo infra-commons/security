@@ -52,11 +52,20 @@ inputs:
       Empty or unrecognised defaults to LOW (report everything).
     required: false
     default: ""
+  # No GitHub expression wrapper anywhere in this file's prose — write the expression
+  # BODY and let the caller supply the wrapper. The runner template-evaluates an
+  # action manifest's whole `inputs:` block: a description is not a comment, and backticks
+  # are not a shield. `needs` is not a context available inside a composite action, so the
+  # wrapped example that used to sit on the line below was a hard
+  # "Failed to load ... action.yml" for every caller, at `Set up job`, before any step ran —
+  # the state this action shipped in from 2026-08-27 until this fix. Guarded now by
+  # `.github/scripts/test_action_manifests.py`.
   run-degraded:
     description: >-
       Whether the run writing the dashboard is itself degraded (create-issues /
-      update-dashboard). Pass the caller's own job outcomes, e.g.
-      `${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}`.
+      update-dashboard). Pass the caller's own job outcomes: the caller wraps this in the
+      expression syntax, and the body it wants is
+      `contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`.
       Both dashboard-writing jobs run under `if: always()`, so nothing else tells the
       renderer that the scan it is reporting on fell over — without this a failed run
       writes a dashboard identical to a healthy one. Empty/false means healthy; an
