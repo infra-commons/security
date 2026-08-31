@@ -51,24 +51,40 @@ import yaml  # pyyaml
 
 PROVIDERS = {
     "anthropic": {
-        "model": "claude-sonnet-4-6",
+        # MID tier, the default for gates (infra-commons/meta model-registry.yaml
+        # `tier_equivalence:`). Lateral bump off claude-sonnet-4-6, which is absent from
+        # the provider's current catalog.
+        "model": "claude-sonnet-5",
         "label": "Claude",
         "marker": "<!-- adversarial-review-bot -->",
         # The primary reviewer blocks on a CRITICAL finding anywhere in the diff.
         "blocking_scope": "always",
     },
     "openai": {
-        # Pinned to the dated snapshot, not the floating `gpt-5.5` alias: an
-        # alias silently re-points the security reviewer's model underneath us,
-        # which is the same class of drift the SHA pins elsewhere exist to stop.
-        # Verified present on the org key's /v1/models listing (2026-07-27).
-        "model": "gpt-5.5-2026-04-23",
+        # MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`), which is
+        # the default for gates. Terra rather than Sol on the operator's call: Sol is
+        # FLAGSHIP, roughly 2x the price (5/30 vs 2/12 per M tokens, measured 2026-08-30).
+        #
+        # NO DATED SNAPSHOT, unlike the `gpt-5.5-2026-04-23` pin this replaces. That pin
+        # existed because a floating alias can silently re-point the security reviewer
+        # underneath us. The tradeoff is now the other way: OpenAI's catalog page lists no
+        # dated snapshots at all, so a dated pin reports "absent from the current catalog"
+        # permanently and model-freshness.py can never resolve it in either direction (see
+        # its known limit 9). An unresolvable pin is the worse drift.
+        #
+        # REACHABILITY IS NOT YET PROVEN ON THIS SURFACE. This calls the direct OpenAI API;
+        # the fleet's only other gpt-5.6-terra pins are product-class, on Azure Foundry,
+        # which is a different deployment surface. gpt-5.6-sol IS proven here
+        # (weekly-security-scan.py). That is what the canary establishes before this
+        # reaches any caller.
+        "model": "gpt-5.6-terra",
         "label": "OpenAI",
         "marker": "<!-- adversarial-review-openai-bot -->",
         # The cross-family second opinion now blocks on a CRITICAL finding
         # anywhere in the diff, same as Claude (see PROVIDERS["anthropic"]
-        # above). Was "high_risk_paths" (PR #48) to bound gpt-4o's false-positive
-        # rate; reversed after infra-commons/meta#630 showed the path-based
+        # above). Was "high_risk_paths" (PR #48) to bound the then-current gpt-4o
+        # reviewer's false-positive rate; reversed after infra-commons/meta#630 showed
+        # the path-based
         # narrowing misses real findings whose paths don't contain a risk word
         # (git-credential-helper token exfiltration path — see the PR body).
         "blocking_scope": "always",
