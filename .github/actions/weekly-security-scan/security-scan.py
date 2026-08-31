@@ -412,15 +412,17 @@ Rules:
 # reading: an error string that names the wrong model is wrong.
 _ANTHROPIC_MODEL = "claude-sonnet-5"
 
-# Sol rather than Terra, operator's call (2026-08-28), on two grounds. This is a security
-# scan, so a missed finding is the expensive direction and the reasoning-strongest model in
-# the tier is the right default — a weekly job's token cost is not the constraint worth
-# optimising against a CRITICAL nobody saw. And Sol is already proven deployed on the
-# reference-check staging surface, where Terra is a catalog entry this fleet has never
-# actually run: no `gpt-5.6-*` pin exists anywhere in the other 43 repos (measured
-# 2026-08-28 via model-freshness.py), so this is the fleet's first, and a model with a live
-# deployment behind it is the safer first.
-_OPENAI_MODEL = "gpt-5.6-sol"
+# Terra, not Sol — a correction to the 2026-08-28 pick, on the operator's call. The earlier
+# reasoning ("a security scan should get the reasoning-strongest model in the tier") had the
+# tier wrong: Sol is FLAGSHIP, Terra is MID, so that was a cross-tier escalation rather than
+# the lateral refresh it looked like. Roughly 2x the price (5/30 vs 2/12 per M tokens,
+# measured 2026-08-30) for a job that runs weekly and blocks no merge.
+#
+# MID is the default for scans and gates — see `tier_equivalence:` in infra-commons/meta
+# model-registry.yaml and "Which tier to pin" in docs/model-freshness.md. The scan cannot
+# catch this class of mistake for you: it ranks by id_prefix, and every OpenAI model shares
+# the prefix `gpt-`, so sol/terra/luna are one tier to it.
+_OPENAI_MODEL = "gpt-5.6-terra"
 
 # Only alphanumeric characters and spaces survive into a system-prompt hint.
 # The suppression `reason` field is user-authored free text — injecting it
