@@ -131,3 +131,49 @@ def test_call_openai_never_sends_max_tokens(monkeypatch):
     assert "max_tokens" not in sent, "reasoning models 400 on max_tokens"
     assert sent["max_completion_tokens"] >= 16384
     assert sent["model"] == scan._OPENAI_MODEL
+
+
+# ── Thinking-block responses (2026-08-31) ───────────────────────────────────────
+#
+# claude-sonnet-5 returns a ThinkingBlock FIRST, and it has no `.text`, so the
+# previous `content[0].text` raised `AttributeError: 'ThinkingBlock' object has
+# no attribute 'text'`. That took capture-findings down at every caller two
+# minutes after the moving tag delivered the model swap, and the same idiom was
+# live in three other composites here. Thinking is not emitted on every call, so
+# it presents as flakiness rather than as a break — which is why the regression
+# is pinned explicitly rather than left to the empty-completion guard above to
+# catch incidentally.
+
+
+def _thinking_block(text="deliberating"):
+    """Shaped like the SDK's ThinkingBlock: carries `.thinking`, never `.text`."""
+    return SimpleNamespace(type="thinking", thinking=text)
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _thinking_response(*blocks, stop_reason="end_turn"):
+    return SimpleNamespace(content=list(blocks), stop_reason=stop_reason)
+
+
+def test_call_claude_reads_past_a_leading_thinking_block(monkeypatch):
+    response = _thinking_response(_thinking_block(), _text_block('{"findings": []}'))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: _FakeAnthropicClient(response))
+    assert scan.call_claude("key", "app", "codebase") == '{"findings": []}'
+
+
+def test_call_claude_joins_text_split_across_blocks(monkeypatch):
+    response = _thinking_response(
+        _thinking_block(), _text_block('{"find'), _text_block('ings": []}')
+    )
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: _FakeAnthropicClient(response))
+    assert scan.call_claude("key", "app", "codebase") == '{"findings": []}'
+
+
+def test_call_claude_raises_when_the_response_is_thinking_only(monkeypatch):
+    response = _thinking_response(_thinking_block())
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kw: _FakeAnthropicClient(response))
+    with pytest.raises(RuntimeError, match="empty completion"):
+        scan.call_claude("key", "app", "codebase")

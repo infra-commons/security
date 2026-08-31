@@ -277,3 +277,48 @@ def test_anthropic_truncated_completion_raises(monkeypatch):
 def test_anthropic_truncation_error_is_not_an_infra_error():
     # Must fail the job (and so block the gate), not fail open like a 5xx.
     assert adv._is_infra_error("anthropic", RuntimeError("token budget")) is False
+
+
+# ── Thinking-block responses (2026-08-31) ───────────────────────────────────────
+#
+# claude-sonnet-5 returns a ThinkingBlock FIRST, and it has no `.text`, so the
+# previous `content[0].text` raised `AttributeError: 'ThinkingBlock' object has
+# no attribute 'text'`. That took capture-findings down at every caller two
+# minutes after the moving tag delivered the model swap, and the same idiom was
+# live in three other composites here. Thinking is not emitted on every call, so
+# it presents as flakiness rather than as a break — which is why the regression
+# is pinned explicitly rather than left to the empty-completion guard above to
+# catch incidentally.
+
+
+def _thinking_block(text="deliberating"):
+    """Shaped like the SDK's ThinkingBlock: carries `.thinking`, never `.text`."""
+    return SimpleNamespace(type="thinking", thinking=text)
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def test_anthropic_reads_past_a_leading_thinking_block(monkeypatch):
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[_thinking_block(), _text_block("### CRITICAL\n- something")],
+    )
+    assert "CRITICAL" in adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
+def test_anthropic_joins_text_split_across_blocks(monkeypatch):
+    # Truncating a review here is worse than elsewhere: a dropped tail can drop
+    # the ### CRITICAL section, and has_critical_findings() then reads clean.
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[_thinking_block(), _text_block("### CRIT"), _text_block("ICAL\n- x")],
+    )
+    assert "### CRITICAL" in adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
+def test_anthropic_raises_when_the_response_is_thinking_only(monkeypatch):
+    _fake_anthropic(monkeypatch, content_blocks=[_thinking_block()])
+    with pytest.raises(RuntimeError, match="empty completion"):
+        adv.call_anthropic("k", "m", "diff", "ctx", "sys")

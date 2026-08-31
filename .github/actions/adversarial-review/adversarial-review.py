@@ -399,6 +399,38 @@ def _build_user_content(diff: str, context: str) -> str:
 
 # ── LLM calls ──────────────────────────────────────────────────────────────────
 
+def _response_text(content_blocks) -> str:
+    """The text of an Anthropic response, ignoring blocks that carry no text.
+
+    `content[0].text` is NOT safe. A thinking-capable model returns a
+    `ThinkingBlock` first, and it has no `.text` — indexing block 0 raises
+    `AttributeError: 'ThinkingBlock' object has no attribute 'text'`. Not
+    hypothetical: that took capture-findings down at every caller on
+    2026-08-31, two minutes after the moving tag delivered the claude-sonnet-5
+    swap. It is intermittent (thinking is not emitted on every call), so the
+    failure presents as flakiness rather than as a break, which is why it is
+    worth selecting by block TYPE here rather than tightening an index.
+
+    Joining rather than taking the first text block matters too: a response
+    split across several text blocks would otherwise be silently truncated,
+    and a truncated security review reads as a shorter list of findings, not
+    as an error.
+
+    A response with no text block at all yields "" — which every call site's
+    existing empty-completion guard already treats as fail-closed.
+    """
+    return "".join(
+        b.text
+        for b in (content_blocks or [])
+        # Two clauses, each earning its place: `type` states the intent (select
+        # text, skip thinking / redacted_thinking / tool_use), and `hasattr`
+        # makes the attribute access itself safe. `type` defaults to "text"
+        # rather than "" because a block that does not declare one is a plain
+        # text block as far as every call site here is concerned.
+        if getattr(b, "type", "text") == "text" and hasattr(b, "text")
+    )
+
+
 def call_anthropic(api_key: str, model: str, diff: str, context: str, system_prompt: str) -> str:
     import anthropic
 
@@ -427,7 +459,7 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
         ),
         flush=True,
     )
-    content = message.content[0].text if message.content else ""
+    content = _response_text(message.content)
 
     # An empty or truncated completion must NOT read as "no findings": that is a
     # silent fail-open, indistinguishable from a clean review. Raise instead —

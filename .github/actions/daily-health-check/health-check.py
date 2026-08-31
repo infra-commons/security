@@ -291,6 +291,38 @@ def select_log_excerpt(log: str, limit: int) -> str:
 
 # ── Claude triage ──────────────────────────────────────────────────────────────
 
+def _response_text(content_blocks) -> str:
+    """The text of an Anthropic response, ignoring blocks that carry no text.
+
+    `content[0].text` is NOT safe. A thinking-capable model returns a
+    `ThinkingBlock` first, and it has no `.text` — indexing block 0 raises
+    `AttributeError: 'ThinkingBlock' object has no attribute 'text'`. Not
+    hypothetical: that took capture-findings down at every caller on
+    2026-08-31, two minutes after the moving tag delivered the claude-sonnet-5
+    swap. It is intermittent (thinking is not emitted on every call), so the
+    failure presents as flakiness rather than as a break, which is why it is
+    worth selecting by block TYPE here rather than tightening an index.
+
+    Joining rather than taking the first text block matters too: a response
+    split across several text blocks would otherwise be silently truncated,
+    and a truncated security review reads as a shorter list of findings, not
+    as an error.
+
+    A response with no text block at all yields "" — which every call site's
+    existing empty-completion guard already treats as fail-closed.
+    """
+    return "".join(
+        b.text
+        for b in (content_blocks or [])
+        # Two clauses, each earning its place: `type` states the intent (select
+        # text, skip thinking / redacted_thinking / tool_use), and `hasattr`
+        # makes the attribute access itself safe. `type` defaults to "text"
+        # rather than "" because a block that does not declare one is a plain
+        # text block as far as every call site here is concerned.
+        if getattr(b, "type", "text") == "text" and hasattr(b, "text")
+    )
+
+
 def diagnose_with_claude(
     workflow_name: str,
     job_name: str,
@@ -354,7 +386,7 @@ mechanical   = true for: clearly fixable with a small edit to a workflow/config 
             raise ValueError(
                 "Claude hit the token budget before finishing (stop_reason='max_tokens')"
             )
-        raw = msg.content[0].text.strip() if msg.content else ""
+        raw = _response_text(msg.content).strip()
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         result = json.loads(raw)
         for key in ("is_transient", "root_cause", "fix", "severity", "mechanical"):
@@ -471,7 +503,7 @@ If you cannot identify a single confident fix, return: {{"old_string": null}}"""
             raise ValueError(
                 "Claude hit the token budget before finishing (stop_reason='max_tokens')"
             )
-        raw = msg.content[0].text.strip() if msg.content else ""
+        raw = _response_text(msg.content).strip()
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         fix = json.loads(raw)
     except Exception as exc:

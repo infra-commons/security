@@ -25,6 +25,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -1017,3 +1018,66 @@ def test_the_transient_scan_looks_at_the_failure_region_not_the_head(monkeypatch
     assert any(re.search(p, window, re.IGNORECASE) for p in hc._TRANSIENT_PATTERNS)
     assert not any(re.search(p, log[:5_000], re.IGNORECASE)
                    for p in hc._TRANSIENT_PATTERNS)
+
+
+# ── Thinking-block responses (2026-08-31) ───────────────────────────────────────
+#
+# claude-sonnet-5 returns a ThinkingBlock FIRST, and it has no `.text`, so the
+# previous `content[0].text` raised `AttributeError: 'ThinkingBlock' object has
+# no attribute 'text'`. That took capture-findings down at every caller two
+# minutes after the moving tag delivered the model swap, and the same idiom was
+# live in three other composites here. Thinking is not emitted on every call, so
+# it presents as flakiness rather than as a break — which is why the regression
+# is pinned explicitly rather than left to the empty-completion guard above to
+# catch incidentally.
+
+
+def _thinking_block(text="deliberating"):
+    """Shaped like the SDK's ThinkingBlock: carries `.thinking`, never `.text`."""
+    return SimpleNamespace(type="thinking", thinking=text)
+
+
+def _text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def _fake_sdk(monkeypatch, blocks, stop_reason="end_turn"):
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return SimpleNamespace(content=list(blocks), stop_reason=stop_reason)
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(hc, "anthropic_sdk", type("SDK", (), {"Anthropic": _FakeClient}))
+
+
+_DIAGNOSIS = ('{"is_transient": false, "root_cause": "r", "fix": "f", '
+              '"severity": "high", "mechanical": false}')
+
+
+def test_diagnose_reads_past_a_leading_thinking_block(monkeypatch):
+    # Both call sites here sit inside `except Exception`, so before the fix this
+    # did not crash — it silently returned the heuristic fallback. A degraded
+    # diagnosis that looks like a real one is the failure mode being pinned.
+    _fake_sdk(monkeypatch, [_thinking_block(), _text_block(_DIAGNOSIS)])
+    result = hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")
+    assert result["root_cause"] == "r"
+    assert result != hc._diagnose_fallback(hc.select_log_excerpt(DEPLOY_LOG, 12_000))
+
+
+def test_diagnose_joins_text_split_across_blocks(monkeypatch):
+    half = len(_DIAGNOSIS) // 2
+    _fake_sdk(
+        monkeypatch,
+        [_thinking_block(), _text_block(_DIAGNOSIS[:half]), _text_block(_DIAGNOSIS[half:])],
+    )
+    assert hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")["severity"] == "high"
+
+
+def test_diagnose_falls_back_when_the_response_is_thinking_only(monkeypatch):
+    _fake_sdk(monkeypatch, [_thinking_block()])
+    result = hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")
+    assert result == hc._diagnose_fallback(hc.select_log_excerpt(DEPLOY_LOG, 12_000))
