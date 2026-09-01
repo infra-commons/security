@@ -649,7 +649,18 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
     )
     msg = client.messages.create(
         model=_ANTHROPIC_MODEL,
-        max_tokens=4096,
+        # 16384, not 4096. claude-sonnet-5 is a THINKING-capable model and its
+        # thinking tokens count against this budget, so a 4096 ceiling is spent on
+        # reasoning before the visible review is finished. Measured live on
+        # 2026-09-01, both failure shapes on rolliq-com/operations:
+        #   64,375-char diff -> output=4096, stop_reason='max_tokens', text truncated
+        #   80,075-char diff -> output=4096, stop_reason='max_tokens', text EMPTY
+        # The guards below caught both and failed closed, which on a gate-required
+        # caller is an unmergeable PR rather than a bad review.
+        # This is the same reasoning-token argument weekly-security-scan's OpenAI
+        # call already carries; it was applied to the OpenAI path and never to the
+        # Anthropic ones, which then moved to a thinking-capable pin.
+        max_tokens=16384,
         system=SYSTEM_PROMPT + suppression_context,
         messages=[{"role": "user", "content": _build_user_content(diff, context)}],
     )
