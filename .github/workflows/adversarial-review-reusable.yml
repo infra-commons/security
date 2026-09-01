@@ -36,10 +36,14 @@ name: Adversarial review (reusable)
 # explicit operator sign-off; see reviews/2026-08-17-composite-pin-posture-decision.md
 # in this repo for the tradeoff being reversed.
 #
-# Bump these two SHAs deliberately, the same way callers bump their pin on this
-# file: cut (or confirm) the composite's own `<family>/vX.Y.Z` immutable release
-# tag, point the `uses:` line at that commit's SHA, and land it as an ordinary
-# reviewed PR to this repo. There is no more zero-PR fleet-wide propagation for
+# Bump these THREE SHAs deliberately, the same way callers bump their pin on
+# this file: cut (or confirm) the composite's own `<family>/vX.Y.Z` immutable
+# release tag, point the `uses:` line at that commit's SHA, and land it as an
+# ordinary reviewed PR to this repo. Three, not two: `adversarial-review` is
+# pinned twice (the Claude reviewer and the OpenAI reviewer are separate jobs)
+# and `adversarial-review-gate` once. Count the composite `uses:` lines below
+# and expect exactly three — a bump that moves only the two reviewer pins is a
+# half bump, and this line said "two" through several of them. There is no more zero-PR fleet-wide propagation for
 # `adversarial-review`/`adversarial-review-gate` fixes — every fix now needs
 # this file bumped, same as every other change here, and every caller pinning
 # this file by SHA needs its own follow-up bump to actually receive it.
@@ -123,7 +127,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review/v1.11.0
+        uses: infra-commons/security/.github/actions/adversarial-review@227529b21e2a8cf414a664caf822a7d89ea2769b # adversarial-review/v1.13.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -150,7 +154,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review/v1.11.0
+        uses: infra-commons/security/.github/actions/adversarial-review@227529b21e2a8cf414a664caf822a7d89ea2769b # adversarial-review/v1.13.0
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -220,9 +224,19 @@ jobs:
       # merge and its degraded paths have to be reachable by a unit test. As
       # inline shell they were reachable only in production, which is where
       # this gate's worst failure mode kept being discovered.
+      #
+      # The SHA below is the adversarial-review/v1.13.0 release commit, shared with
+      # the two reviewer steps above so one release is one SHA in this file. It is
+      # deliberately NOT tagged in this action's own family: no
+      # `adversarial-review-gate/vX.Y.Z` tag exists past v1.3.0, and the moving
+      # `adversarial-review-gate/v1` still points at 01fff5eb, which predates the
+      # gate fix in #135. The comment therefore names the release, not a gate-family
+      # tag — earlier revisions of this line claimed `adversarial-review-gate/v1.9.0`
+      # and `v1.11.0`, neither of which has ever existed. The gate composite's own
+      # bytes are unchanged since #135 (1241d6a8), so this bump is a no-op for it.
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review-gate/v1.11.0
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@227529b21e2a8cf414a664caf822a7d89ea2769b # = adversarial-review/v1.13.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
