@@ -1,8 +1,20 @@
 name: Capture security findings (reusable)
 
-# Reusable post-merge findings capture. Reviews the merged diff and files
-# HIGH/MEDIUM/LOW findings as tracked GitHub Issues — complementing the
-# CRITICAL gate that runs at PR time.
+# Reusable post-merge findings capture. Files HIGH/MEDIUM/LOW findings as tracked
+# GitHub Issues — complementing the CRITICAL gate that runs at PR time.
+#
+# Findings come from TWO sources, merged into one deduplicated set:
+#
+#   1. The PR-time adversarial-review comments already on the merged PR — BOTH
+#      reviewers (Anthropic and OpenAI), at no additional model spend.
+#   2. This workflow's own post-merge review pass over the merged diff (Anthropic).
+#
+# Source 1 exists because of infra-commons/meta#1187: the PR-time gate runs two
+# models and this capture ran one, so a HIGH that only the OpenAI reviewer raised —
+# and, per klsjapan-com/nutrition-tracker#228, even one BOTH reviewers agreed on —
+# became a tracked issue only if the single post-merge model happened to rediscover
+# it. Reading what the reviewers already wrote is the fix; a second post-merge model
+# would only have bought a second lottery ticket, at double the spend.
 #
 # Reviews only the merged diff (before...after) — never the full codebase —
 # so a given diff is reviewed exactly once and findings on unchanged code
@@ -48,6 +60,15 @@ on:
         type: string
         required: false
         default: ""
+      ingest_pr_reviews:
+        description: >-
+          Set false to review only the merged diff, as this workflow did before
+          infra-commons/meta#1187 — findings raised by a PR-time reviewer but not
+          rediscovered by the post-merge pass then go unfiled again, which is the gap
+          the ingest closes. Default true.
+        type: boolean
+        required: false
+        default: true
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -110,6 +131,19 @@ jobs:
           # as an indistinguishable `NOT_FOUND` (infra-commons/meta#661).
           permission-organization-projects: write
           permission-issues: read
+          # Reading the PR-time reviewers' comments (infra-commons/meta#1187). This job's
+          # `github.token` can never carry this: a called workflow's token is capped by the
+          # CALLER's `permissions:` block, and callers grant `contents: read` + `issues: write`
+          # only. Requesting `pull-requests: read` in this job's own `permissions:` block below
+          # would not widen it either — it would hard-fail every caller that hasn't first edited
+          # its own workflow, which is the security#90 fleet-outage shape. The App installation
+          # already holds `pull_requests` in every org, so minting it here needs no caller change
+          # at all — only the pin bump any change to this file needs.
+          #
+          # capture.py tries `github.token` FIRST and falls back to this, so a caller still on an
+          # older pin degrades to commit-subject PR resolution rather than breaking. It reports
+          # which credential won in the job summary.
+          permission-pull-requests: read
 
       # Pinned to the capture-findings/v1 moving tag, not a raw SHA: a capture.py fix
       # ships by moving this tag (see README) — no reusable/consumer edit needed, which
@@ -124,3 +158,4 @@ jobs:
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           severity-floor: ${{ inputs.severity_floor }}
           board-app-token: ${{ steps.board-token.outputs.token }}
+          ingest-pr-reviews: ${{ inputs.ingest_pr_reviews }}

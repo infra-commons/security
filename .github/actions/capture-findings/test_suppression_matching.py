@@ -374,6 +374,69 @@ def test_category_pattern_foil_a_different_class_sharing_file_and_trigger_word()
     assert not hit, f"foil (category=secrets) was wrongly suppressed by {sup_id!r}"
 
 
+def test_category_pattern_does_not_bypass_suppression_for_an_ingested_finding():
+    """A finding with no category must still be suppressible (infra-commons/meta#1187).
+
+    Findings ingested from a PR-time reviewer's comment carry `category: "unknown"` —
+    a bullet in a markdown section has no category field to classify it. If an absent
+    category were treated as a failed match, an existing suppression could stop
+    covering the very same real finding as soon as it arrived through the new door: a
+    suppression BYPASS created by adding a second source, which would re-file findings
+    a human had already accepted, on every merge.
+
+    `category_pattern` only ever NARROWS a match, so skipping the narrowing filter when
+    there is nothing to narrow on is the behaviour that preserves the entry's intent.
+    """
+    ingested = dict(META_611_FINDING, category="unknown")
+    entry = {
+        "id": "category-anchored-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "category_pattern": "dependency",
+        "finding_pattern": "wildcard",
+    }
+    hit, sup_id = capture.is_suppressed(ingested, [entry])
+    assert hit and sup_id == "category-anchored-synthetic", (
+        "an ingested finding with category='unknown' escaped a suppression that covers "
+        "the identical finding arriving from the post-merge review pass"
+    )
+
+
+def test_absent_category_field_behaves_the_same_as_unknown():
+    ingested = {k: v for k, v in META_611_FINDING.items() if k != "category"}
+    entry = {
+        "id": "category-anchored-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "category_pattern": "dependency",
+        "finding_pattern": "wildcard",
+    }
+    hit, _ = capture.is_suppressed(ingested, [entry])
+    assert hit
+
+
+def test_a_real_category_still_discriminates():
+    """The bypass fix must not blunt the anchor for findings that DO carry a category.
+
+    Same foil as the test above: a genuinely different finding, correctly classified,
+    that `category_pattern` exists to exclude. If relaxing the "unknown" case had been
+    written as "skip the filter whenever it doesn't match", this would start passing
+    the filter and get wrongly suppressed.
+    """
+    foil = {
+        "location": "devops-manifest.yaml:88",
+        "title": "Wildcard-scoped TLS certificate private key path committed",
+        "description": "A private key path for the *.rolliq.com wildcard TLS certificate.",
+        "category": "secrets",
+    }
+    entry = {
+        "id": "category-anchored-synthetic",
+        "file_pattern": r"devops-manifest\.yaml(:\d+(-\d+)?)?$",
+        "category_pattern": "dependency",
+        "finding_pattern": "wildcard",
+    }
+    hit, sup_id = capture.is_suppressed(foil, [entry])
+    assert not hit, f"foil (category=secrets) was wrongly suppressed by {sup_id!r}"
+
+
 def test_category_pattern_is_a_no_op_for_every_live_entry():
     """The too-narrow direction: no entry in the canonical file sets category_pattern today.
 

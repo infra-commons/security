@@ -63,12 +63,52 @@ Cross-org rollout and secret provisioning are out of scope for this reusable —
 
 | Workflow | Purpose |
 |---|---|
-| `capture-findings-reusable.yml` | Post-merge capture of HIGH/MEDIUM/LOW security findings as GitHub Issues |
+| `capture-findings-reusable.yml` | Post-merge capture of HIGH/MEDIUM/LOW security findings as GitHub Issues ([two sources](#capture-findings-reads-both-pr-time-reviewers)) |
 | `secret-scan-reusable.yml` | Gitleaks secret scanning |
 | `daily-health-check-reusable.yml` | Daily repo health check (Dependabot triage, failed-run diagnosis, auto-merged-in-last-24h visibility) |
 | `weekly-security-scan-reusable.yml` | Weekly full-repo security scan |
 | `auto-merge-churn-reusable.yml` | Auto-approve + enable auto-merge for low-risk bot churn PRs (Plan 1c) |
 | `tier-a.yml` / `tier-b.yml` / `tier-c.yml` | Tiered security posture bundles |
+
+#### capture-findings reads both PR-time reviewers
+
+The PR-time `adversarial-review` gate runs **two** models; `capture-findings` used to run
+**one**. Only CRITICAL blocks a merge, so a HIGH that the OpenAI reviewer raised and the
+Anthropic one did not became a tracked issue only if capture's independent post-merge pass
+happened to rediscover it — luck, not a mechanism. A HIGH that *both* reviewers agreed on
+fell through the same hole, because capture never read either comment
+(infra-commons/meta#1187, klsjapan-com/nutrition-tracker#228).
+
+It now files findings from **two sources**, merged into one deduplicated set:
+
+1. **The PR-time review comments already on the merged PR** — both reviewers, no extra
+   model spend. Findings already suppressed at PR time stay suppressed; a comment that
+   carries a reviewer marker but not the mandated format is reported as drift, never read
+   as "no findings".
+2. **Its own post-merge review pass** over the merged diff, as before.
+
+The two sources collapse on severity + file path (not `file:line` — the two number
+against different trees). A filed issue's body names which reviewers raised it, and
+issues that came through the PR-time door also carry `source:pr-review`.
+
+**Reading PR comments needs a credential the job token cannot have.** A called workflow's
+`GITHUB_TOKEN` is capped by the *caller's* `permissions:` block, and callers grant
+`contents: read` + `issues: write`. Requesting `pull-requests: read` in the reusable's job
+block would not widen it — it would hard-fail every caller that had not first edited its
+own workflow. So the App token the workflow already mints for board-intake now also
+requests `pull-requests: read`. capture.py tries the job token first and falls back to it.
+
+Practically, for a caller:
+
+| Caller state | What it gets |
+|---|---|
+| Old reusable pin | Ingest runs on the moving tag; PRs resolved from commit subjects only, so squash merges without a trailing `(#N)` are missed |
+| Pin bumped to this reusable or later | Authoritative PR resolution via the App token |
+| No `INFRA_COMMONS_BOT_PRIVATE_KEY` | Job token only; degrades as above |
+
+Every degraded path is reported to stderr *and* the job summary, naming the credential
+that was refused — a run that ingested nothing says so. Set `ingest_pr_reviews: false` to
+turn the ingest off and restore the previous single-source behaviour.
 
 #### Reusables' internal composite pins — per-family moving tags, not raw SHAs
 

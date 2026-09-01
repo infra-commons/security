@@ -42,3 +42,23 @@ def test_board_token_also_requests_issues_read():
         "without this, addProjectV2ItemById cannot resolve the issue node it was just handed, "
         "and fails as NOT_FOUND indistinguishable from a genuinely absent node"
     )
+
+
+def test_board_token_also_requests_pull_requests_read():
+    """The PR-time review ingest's only guaranteed credential (infra-commons/meta#1187).
+
+    This job's `github.token` can never carry `pull-requests`: a called workflow's token
+    is capped by the CALLER's `permissions:` block, and callers grant `contents: read` +
+    `issues: write` only. Widening the job's own `permissions:` block would not help —
+    it would hard-fail every caller that had not first edited its own workflow.
+
+    Dropping this key does not break anything loudly. capture.py falls back to
+    resolving pull requests from commit subjects, which misses every squash merge whose
+    subject carries no trailing `(#N)` — so the ingest quietly gets thinner rather than
+    stopping, which is the failure shape #1187 exists to remove.
+    """
+    with_block = _board_token_step()["with"]
+    assert with_block.get("permission-pull-requests") == "read", (
+        "without this, capture.py cannot read the PR-time reviewers' comments through the "
+        "App token and silently degrades to commit-subject PR resolution"
+    )
