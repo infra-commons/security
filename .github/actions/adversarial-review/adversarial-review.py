@@ -437,10 +437,21 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=model,
-        max_tokens=4096,
+        # 16384, not 4096. claude-sonnet-5 is a THINKING-capable model and its
+        # thinking tokens count against this budget, so a 4096 ceiling is spent on
+        # reasoning before the visible review is finished. Measured live on
+        # 2026-09-01, both failure shapes on rolliq-com/operations:
+        #   64,375-char diff -> output=4096, stop_reason='max_tokens', text truncated
+        #   80,075-char diff -> output=4096, stop_reason='max_tokens', text EMPTY
+        # The guards below caught both and failed closed, which on a gate-required
+        # caller is an unmergeable PR rather than a bad review.
+        # This is the same reasoning-token argument weekly-security-scan's OpenAI
+        # call already carries; it was applied to the OpenAI path and never to the
+        # Anthropic ones, which then moved to a thinking-capable pin.
+        max_tokens=16384,
         # SYSTEM_PROMPT is static per repo (only ever extended by appended
         # suppression hints, never shrunk) and comfortably clears the
-        # 1,024-token Sonnet-4.6 cache minimum, so it's cacheable across
+        # 1,024-token Sonnet cache minimum, so it's cacheable across
         # consecutive reviews on the same repo within the TTL.
         system=[{
             "type": "text",
