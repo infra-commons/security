@@ -123,7 +123,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@c197175b589a67b1305674736e2e9e29414f87b1 # adversarial-review/v1.10.0
+        uses: infra-commons/security/.github/actions/adversarial-review@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review/v1.11.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -150,7 +150,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@c197175b589a67b1305674736e2e9e29414f87b1 # adversarial-review/v1.10.0
+        uses: infra-commons/security/.github/actions/adversarial-review@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review/v1.11.0
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -222,7 +222,7 @@ jobs:
       # this gate's worst failure mode kept being discovered.
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@1f790ff9af9f82e3478ca1c9ce7cf53a993355eb # adversarial-review-gate/v1.9.0
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # adversarial-review-gate/v1.11.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
