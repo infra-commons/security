@@ -35,6 +35,17 @@ Optional env vars:
                               gets an individual issue; below it, findings roll
                               into the rolling MEDIUM/LOW digest instead.
                               Empty/unset defaults to HIGH (historical behaviour).
+  BOARD_APP_TOKEN             App installation token. Adds a filed HIGH to the org
+                              board, and is the fallback credential for reading
+                              PR-time review comments (see the ingest section).
+  INGEST_PR_REVIEWS           "false" disables the PR-time review ingest below.
+                              Anything else (or unset) leaves it on.
+
+Findings come from TWO sources, merged into one candidate list:
+  1. The PR-time adversarial-review comments already on the merged PR — BOTH
+     reviewers, at no additional model spend. See the "PR-time review ingest"
+     section; infra-commons/meta#1187 for why this exists.
+  2. This module's own post-merge review pass over the merged diff.
 """
 import json
 import os
@@ -541,7 +552,15 @@ def is_suppressed(finding: dict, suppressions: list[dict]) -> tuple[bool, str | 
             continue
         try:
             cat_pat = sup.get("category_pattern", "")
-            if cat_pat and not re.search(cat_pat, category, re.IGNORECASE):
+            # "unknown" means the finding arrived without a category, not that its
+            # category failed to match. A finding ingested from a PR-time reviewer
+            # comment has no category field to classify it, so treating the absence as
+            # a mismatch would let it walk straight past a suppression that already
+            # covers the same real finding coming through the post-merge door — a
+            # suppression BYPASS created by adding the second door. Absent category
+            # therefore skips the narrowing filter rather than defeating the match.
+            if (cat_pat and category not in ("", "unknown")
+                    and not re.search(cat_pat, category, re.IGNORECASE)):
                 continue
             if (re.search(file_pat, location, re.IGNORECASE)
                     and re.search(find_pat, text, re.IGNORECASE)):
@@ -708,6 +727,11 @@ _LABELS = [
     {"name": "severity:medium",       "color": "f9d0c4", "description": "Fix within 90 days"},
     {"name": "severity:low",          "color": "e0e0e0", "description": "Best-practice improvement"},
     {"name": "source:adversarial-ai", "color": "7057ff", "description": "Adversarial AI review finding"},
+    # Applied ALONGSIDE source:adversarial-ai, never instead of it — other tooling
+    # (weekly-security-scan's auto-close) keys on that label, so replacing it would
+    # change behaviour well outside this module. This one only records which door the
+    # finding came through, so the value of the PR-time ingest is measurable.
+    {"name": "source:pr-review",      "color": "5319e7", "description": "Ingested from a PR-time adversarial review comment"},
     {"name": "wont-fix",              "color": "cccccc", "description": "Suppressed — accepted risk or false positive; will not be re-filed"},
 ]
 
@@ -818,6 +842,523 @@ def update_issue_body(token: str, repo: str, number: int, body: str) -> None:
             json={"body": body[:65_000]},
         ).raise_for_status()
 
+
+# ── PR-time review ingest ──────────────────────────────────────────────────────
+#
+# The PR-time adversarial-review gate runs TWO reviewers (Anthropic + OpenAI), each
+# posting its findings as its own PR comment. This module's own post-merge pass runs
+# ONE, against a freshly re-reviewed diff. So a HIGH raised only by the OpenAI
+# reviewer — or, per klsjapan-com/nutrition-tracker#228 finding 6, even one that BOTH
+# reviewers agreed on — became a tracked issue only if the single post-merge model
+# happened to rediscover it independently. That is luck, not a mechanism
+# (infra-commons/meta#1187).
+#
+# This section closes the gap by reading what the reviewers already wrote, at no
+# additional model spend. It is a COMPLEMENT to review_diff(), never a replacement:
+# both sources feed one candidate list via merge_candidates() below.
+#
+# Everything here degrades rather than raises — an ingest fault must never sink a run
+# that files findings today. But it must never be SILENT either: "no signal
+# distinguishing 'no finding' from 'the model that would have found it never ran'" is
+# the exact complaint #1187 makes, and rebuilding that shape here would be
+# self-defeating. Every give-up path prints to stderr AND writes to the job summary.
+
+_PR_COMMENT_MARKERS = {
+    "<!-- adversarial-review-bot -->": "Claude",
+    "<!-- adversarial-review-openai-bot -->": "OpenAI",
+}
+
+# The identity the reviewers' comments carry. Mirrors adversarial-review.py's
+# TRUSTED_COMMENT_AUTHOR and exists for the same reason: anyone who can comment on a
+# PR can paste a well-formed marker, so the marker alone is not evidence of
+# provenance. A comment whose author is not this login is treated exactly like a
+# comment carrying no marker at all.
+TRUSTED_COMMENT_AUTHOR = "github-actions[bot]"
+
+_MAX_RANGE_COMMITS = 20        # first-parent commits we resolve PRs for
+_MAX_PRS_PER_RUN = 10          # distinct PRs whose comments we read
+_MAX_COMMENT_PAGES = 5         # 100 comments per page
+_MAX_PR_FINDINGS_PER_RUN = 25  # hard cap; see the truncation note in ingest_pr_review_findings
+
+_FINDINGS_ANCHOR_RE = re.compile(r'(?mi)^##\s+Security findings\s*$')
+_SECTION_RE = re.compile(r'(?mi)^###\s+(CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*$')
+_ANY_SECTION_RE = re.compile(r'(?m)^###\s')
+_SUPPRESSED_CUT_RE = re.compile(r'\n---\s*\n<details>', re.IGNORECASE)
+_SKIPPED_RE = re.compile(r'(?mi)^##\s+Adversarial AI Security Review\b.*\(skipped:')
+_BULLET_STRICT_RE = re.compile(r'^-\s+\[([^\]]{1,200})\]\s*(.+)$')
+# Recovery form for a reviewer that dropped the [file:line] brackets but still named
+# a file first, e.g. "- **src/app.py:12** — description".
+_BULLET_RELAXED_RE = re.compile(
+    r'^-\s+[*`_]*([\w./\\-]+\.[A-Za-z0-9]+(?::\d+(?:-\d+)?)?)[*`_]*\s*[:—-]?\s+(.+)$'
+)
+# The same "None" test adversarial-review.py already applies to its own sections.
+_NONE_RE = re.compile(r'^[Nn]one[.!?\s]*$')
+# The literal placeholder the system prompt puts under an empty section.
+_PLACEHOLDER_RE = re.compile(r'^[_*]*\(?\s*or\s+["“]?none["”]?\s*\)?[_*]*[.!?\s]*$', re.IGNORECASE)
+_COMMIT_LINE_RE = re.compile(r'(?m)^>\s*Commit:\s*`([0-9a-fA-F]{8,40})`')
+_MERGE_SUBJECT_RE = re.compile(r'^Merge pull request #(\d+) from \S')
+_SQUASH_TRAILER_RE = re.compile(r'\(#(\d+)\)\s*$')
+
+
+def _step_summary(text: str) -> None:
+    """Append to the job summary, best-effort.
+
+    A degraded ingest has to be visible to someone reading the run, not only to
+    someone reading stderr — see the section header. Precedent: gate.py, and
+    adversarial-review.py's quota notice.
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n")
+    except OSError as exc:
+        print(f"Warning: could not write job summary: {exc}", file=sys.stderr)
+
+
+def _get_json(path: str, params: dict, tokens: list[tuple[str, str]]):
+    """GET an API path, trying each (label, token) in turn.
+
+    Returns (payload, None) on the first 200, or (None, reason) once every credential
+    has been refused. 401/403/404 advance to the next token; any other status stops
+    the chain, because a 5xx is not a permissions answer.
+
+    Why a chain at all: this job's `github.token` is capped by the CALLER's
+    permissions block — a called workflow can never hold more than its caller granted,
+    and the verified callers grant only `contents: read` + `issues: write`. Which
+    credential can read pull requests is therefore a per-caller fact this code cannot
+    know in advance. Naming the credential that won, in the run log, is how the first
+    live run answers it.
+    """
+    attempts: list[str] = []
+    for label, tok in tokens:
+        if not tok:
+            continue
+        try:
+            with httpx.Client(timeout=_TIMEOUT) as client:
+                resp = client.get(f"{GITHUB_API}{path}", headers=_headers(tok), params=params)
+        except httpx.HTTPError as exc:
+            attempts.append(f"{label}: transport error ({exc})")
+            continue
+        if resp.status_code == 200:
+            return resp.json(), None
+        attempts.append(f"{label}: HTTP {resp.status_code}")
+        if resp.status_code not in (401, 403, 404):
+            break
+    if not attempts:
+        return None, f"GET {path}: no credential available"
+    return None, f"GET {path}: " + "; ".join(attempts)
+
+
+def range_commits(before: str, after: str) -> list[str]:
+    """Newest-first first-parent commits in before..after, capped.
+
+    `--first-parent` is the load-bearing flag. A promotion merge that pulls dozens of
+    commits onto the default branch is ONE first-parent commit, and the promotion PR
+    carries its own adversarial review over the same diff this module is capturing —
+    so walking every contained commit would multiply the API cost without yielding a
+    single additional distinct PR.
+    """
+    if not _SHA_RE.match(after or ""):
+        return []
+    if not before or set(before) == {"0"} or not _SHA_RE.match(before):
+        return [after]
+    probe = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", before, after],
+        capture_output=True, encoding="utf-8",
+    )
+    if probe.returncode != 0:
+        # Force-push or unrelated history: before..after is not a walkable range.
+        print(
+            f"Warning: {before[:8]} is not an ancestor of {after[:8]} — "
+            "resolving pull requests from the head commit only.",
+            file=sys.stderr,
+        )
+        return [after]
+    result = subprocess.run(
+        ["git", "rev-list", "--first-parent",
+         f"--max-count={_MAX_RANGE_COMMITS}", f"{before}..{after}"],
+        capture_output=True, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        return [after]
+    commits = [ln.strip() for ln in result.stdout.splitlines() if _SHA_RE.match(ln.strip())]
+    return commits or [after]
+
+
+def _pr_numbers_in_subject(subject: str) -> list[int]:
+    """PR-number candidates in a commit subject — anchored forms only.
+
+    Exactly two forms are accepted:
+      "Merge pull request #N from <branch>"   GitHub's own merge-commit subject
+      "... (#N)"  END-ANCHORED                GitHub's squash-merge trailer
+
+    A mid-subject "(#N)" is deliberately NOT accepted: in these repos it names an
+    ISSUE, not a pull request. Real subjects from rolliq-com/operations:
+        fix(exemption-census): assert which App ... (operations#356) (#359)
+        docs(ops311): the customer-tenant dispatch gate ... (#311) (#328)
+    In both, only the trailing number is the PR. Every candidate is verified against
+    the API regardless; this only keeps the verification budget honest.
+    """
+    out: list[int] = []
+    subject = subject.strip()
+    m = _MERGE_SUBJECT_RE.match(subject)
+    if m:
+        out.append(int(m.group(1)))
+    m = _SQUASH_TRAILER_RE.search(subject)
+    if m and int(m.group(1)) not in out:
+        out.append(int(m.group(1)))
+    return out
+
+
+def _commit_subjects(commits: list[str]) -> list[str]:
+    subjects: list[str] = []
+    for sha in commits:
+        if not _SHA_RE.match(sha):
+            continue
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s", sha],
+            capture_output=True, encoding="utf-8",
+        )
+        if result.returncode == 0:
+            subjects.append(result.stdout.strip())
+    return subjects
+
+
+def _pull_requests_from_subjects(repo: str, commits: list[str], tokens) -> list[int]:
+    """Fallback PR resolution via commit subjects, each candidate API-verified.
+
+    A candidate is kept only if /issues/{N} comes back carrying a `pull_request`
+    object with a non-null `merged_at` — so an issue number that slipped through the
+    subject patterns is dropped rather than filed against.
+    """
+    numbers: list[int] = []
+    seen: set[int] = set()
+    for subject in _commit_subjects(commits):
+        for candidate in _pr_numbers_in_subject(subject):
+            if candidate in seen or len(seen) >= _MAX_PRS_PER_RUN:
+                continue
+            seen.add(candidate)
+            payload, _ = _get_json(f"/repos/{repo}/issues/{candidate}", {}, tokens)
+            if not isinstance(payload, dict):
+                continue
+            pr = payload.get("pull_request")
+            if isinstance(pr, dict) and pr.get("merged_at"):
+                numbers.append(candidate)
+    return numbers
+
+
+def resolve_pull_requests(repo: str, commits: list[str], tokens) -> tuple[list[int], str]:
+    """Merged PR numbers covering `commits`, plus the method that resolved them."""
+    numbers: list[int] = []
+    seen: set[int] = set()
+    api_failure = None
+    for sha in commits:
+        if len(seen) >= _MAX_PRS_PER_RUN:
+            break
+        payload, reason = _get_json(f"/repos/{repo}/commits/{sha}/pulls", {"per_page": 100}, tokens)
+        if payload is None:
+            api_failure = reason
+            break
+        for pr in payload if isinstance(payload, list) else []:
+            if not isinstance(pr, dict):
+                continue
+            number = pr.get("number")
+            if not isinstance(number, int) or number in seen or not pr.get("merged_at"):
+                continue
+            seen.add(number)
+            numbers.append(number)
+            if len(seen) >= _MAX_PRS_PER_RUN:
+                break
+    if numbers or api_failure is None:
+        return numbers, "commits/{sha}/pulls"
+    print(
+        f"Notice: pull-request lookup unavailable ({api_failure}) — "
+        "falling back to commit subjects.",
+        file=sys.stderr,
+    )
+    return _pull_requests_from_subjects(repo, commits, tokens), "commit subjects"
+
+
+def fetch_pr_comments(repo: str, pr_number: int, tokens) -> tuple[list[dict], str | None]:
+    """Every issue comment on a PR, paginated. Returns (comments, failure_reason)."""
+    comments: list[dict] = []
+    for page in range(1, _MAX_COMMENT_PAGES + 1):
+        payload, reason = _get_json(
+            f"/repos/{repo}/issues/{pr_number}/comments",
+            {"per_page": 100, "page": page}, tokens,
+        )
+        if payload is None:
+            return comments, reason
+        batch = [c for c in (payload if isinstance(payload, list) else []) if isinstance(c, dict)]
+        comments.extend(batch)
+        if len(batch) < 100:
+            break
+    return comments, None
+
+
+def _bullet_title(description: str) -> str:
+    """First sentence of a finding description, bounded for use in an issue title."""
+    stripped = description.strip()
+    first = re.split(r'(?<=[.!?])\s', stripped, maxsplit=1)[0].strip().rstrip(" .")
+    if not first:
+        first = stripped
+    if len(first) > 120:
+        cut = first[:117]
+        space = cut.rfind(" ")
+        first = (cut[:space] if space > 40 else cut) + "…"
+    return first
+
+
+def _parse_section_bullets(chunk: str, severity: str) -> tuple[list[dict], int]:
+    """Findings in one severity section, plus a count of bullets we could not read."""
+    findings: list[dict] = []
+    unparsed = 0
+    current: dict | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current is None:
+            return
+        raw_desc = current.pop("_raw_desc")
+        # sanitize() AFTER truncation, never before: its escaping (`[` -> `\[`,
+        # backtick -> entity) would otherwise consume the character budget and cut
+        # the visible text short.
+        current["title"] = sanitize(_bullet_title(raw_desc), 240)
+        current["description"] = sanitize(raw_desc, 800)
+        findings.append(current)
+        current = None
+
+    for raw_line in chunk.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Headings, blockquotes (the "> Commit:" preamble) and table rows are never
+        # findings, and they terminate any bullet still being accumulated.
+        if line.startswith(("#", ">", "|")):
+            flush()
+            continue
+        if _PLACEHOLDER_RE.match(line) or _NONE_RE.match(line):
+            flush()
+            continue
+        if not line.startswith("- "):
+            if current is not None:
+                current["_raw_desc"] = f"{current['_raw_desc']} {line}"[:1200]
+            continue
+        flush()
+        content = line[2:].strip()
+        # A struck-through entry is a suppressed finding that escaped the block cut in
+        # parse_review_comment; re-filing it would undo a decision taken at PR time.
+        if "~~" in content:
+            continue
+        probe = re.sub(r'^\[[^\]]*\]\s*', '', content).strip(" _*()\"").strip()
+        if probe.lower().startswith("or "):
+            probe = probe[3:].strip().strip('"')
+        if not probe or _NONE_RE.match(probe):
+            continue
+        m = _BULLET_STRICT_RE.match(line) or _BULLET_RELAXED_RE.match(line)
+        if not m:
+            # Reported, never filed: a bullet we cannot read is not a finding we can
+            # describe, but it is also not nothing.
+            unparsed += 1
+            continue
+        current = {
+            "severity": severity,
+            "location": sanitize(m.group(1).strip(), 200),
+            "category": "unknown",
+            "_raw_desc": m.group(2).strip(),
+        }
+    flush()
+    return findings, unparsed
+
+
+def parse_review_comment(body: str, source: str) -> dict:
+    """Turn one reviewer's PR comment into finding dicts. Pure — no I/O.
+
+    Returns {"source", "status", "findings", "unparsed", "head_sha"}, where status is
+      "parsed"        the mandated format was found and read
+      "skipped-infra" the reviewer reported it could not run at all
+      "drift"         the marker is present but the mandated format is not
+
+    The format read here is MANDATED by adversarial-review.py's SYSTEM_PROMPT and is
+    already parsed by two production functions there (has_critical_findings,
+    apply_suppressions). This reads STRUCTURE — a section header and a bullet — and
+    never tries to decide what a finding is ABOUT. That is the difference between this
+    and the prose-matching that suppression entries do, where a model swap can
+    resurface settled false positives because the regex was standing in for meaning.
+    """
+    result: dict = {
+        "source": source, "status": "parsed",
+        "findings": [], "unparsed": 0, "head_sha": "",
+    }
+
+    commit_match = _COMMIT_LINE_RE.search(body)
+    if commit_match:
+        result["head_sha"] = commit_match.group(1)
+
+    # 1. Cut the suppressed-findings block FIRST. Those entries were matched against
+    #    the suppressions file and deliberately withheld at PR time; re-filing them
+    #    here would silently undo a settled decision.
+    body = _SUPPRESSED_CUT_RE.split(body, maxsplit=1)[0]
+
+    # 2. An infra warning carries the marker but reports the reviewer never ran. Not
+    #    drift — but worth surfacing, because it means the PR merged with no review
+    #    from this provider at all.
+    if _SKIPPED_RE.search(body):
+        result["status"] = "skipped-infra"
+        return result
+
+    # 3. Anchor. No anchor but severity sections present = partial drift we can still
+    #    read. Neither = drift we cannot, and which must NOT be read as "no findings".
+    anchor = _FINDINGS_ANCHOR_RE.search(body)
+    if anchor:
+        region = body[anchor.end():]
+    elif _SECTION_RE.search(body):
+        region = body
+    else:
+        result["status"] = "drift"
+        return result
+
+    # 4. Each section runs to the next "###" of any kind, so "### Summary" terminates
+    #    the last findings section and its prose is never read as bullets. The
+    #    blockquote preamble, the advisory note and the cache marker all sit ABOVE the
+    #    anchor and are excluded structurally rather than by pattern-matching.
+    for section in _SECTION_RE.finditer(region):
+        nxt = _ANY_SECTION_RE.search(region, section.end())
+        chunk = region[section.end():nxt.start() if nxt else len(region)]
+        found, unparsed = _parse_section_bullets(chunk, section.group(1).upper())
+        result["findings"].extend(found)
+        result["unparsed"] += unparsed
+    return result
+
+
+def _merge_key(finding: dict) -> str:
+    """Collapse key for the same finding seen through both doors.
+
+    Severity + FILE PATH, with the line number deliberately dropped. The two doors
+    disagree about line numbers by construction: a PR-time reviewer numbers against
+    the PR diff and may write a range ("capture.py:1168-1176"), while the post-merge
+    pass numbers against the merged tree. Keying on the exact "file:line" string —
+    which is what _location_key() does for issue TITLES — therefore fails to collapse
+    the same real finding, and would file it two or three times. That is worse than
+    the gap this module exists to close.
+
+    The cost: two genuinely different findings of the same severity in one file merge
+    into a single issue. Nothing is lost — both descriptions are carried into the body
+    under their own source labels. This trade is deliberate. Do not "fix" it by
+    restoring line numbers to the key without first fixing the disagreement above.
+    """
+    path = str(finding.get("location", "")).split(":", 1)[0].strip().lstrip("./").lower()
+    return f"{finding.get('severity', '')}|{path}"
+
+
+def merge_candidates(pr_findings: list[dict], model_findings: list[dict]) -> list[dict]:
+    """One candidate per (severity, file); PR-time findings take precedence.
+
+    PR-time findings go in first so their location and title win: they are what #1187
+    exists to capture, and they carry named-reviewer provenance the post-merge pass
+    cannot.
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for finding in list(pr_findings) + list(model_findings):
+        key = _merge_key(finding)
+        existing = merged.get(key)
+        if existing is None:
+            entry = dict(finding)
+            if not entry.get("sources"):
+                entry["sources"] = ["post-merge review pass"]
+            merged[key] = entry
+            order.append(key)
+            continue
+        for src in finding.get("sources") or ["post-merge review pass"]:
+            if src not in existing["sources"]:
+                existing["sources"].append(src)
+        extra = str(finding.get("description", "")).strip()
+        if extra and extra not in existing.get("description", ""):
+            existing["description"] = f"{existing.get('description', '')}\n\n{extra}"[:1600]
+        if existing.get("category") in ("", "unknown") and finding.get("category") not in ("", "unknown"):
+            existing["category"] = finding["category"]
+    return [merged[k] for k in order]
+
+
+def ingest_pr_review_findings(repo: str, before: str, after: str, tokens) -> tuple[list[dict], list[str]]:
+    """Findings both PR-time reviewers already reported on the PRs in this push.
+
+    Returns (findings, notes). Every note names something that was NOT ingested;
+    main() prints them and writes them to the job summary.
+    """
+    notes: list[str] = []
+    commits = range_commits(before, after)
+    if not commits:
+        return [], ["no commits resolved for this push"]
+
+    numbers, method = resolve_pull_requests(repo, commits, tokens)
+    if not numbers:
+        notes.append(
+            f"no merged pull request resolved for this push (method: {method}) — "
+            "PR-time reviewer findings were NOT ingested"
+        )
+        return [], notes
+    print(f"  PR-time ingest: resolved PR(s) {numbers} via {method}")
+
+    findings: list[dict] = []
+    for number in numbers:
+        comments, reason = fetch_pr_comments(repo, number, tokens)
+        if reason:
+            notes.append(f"could not read comments on #{number} ({reason})")
+            continue
+        saw_marker = False
+        for comment in comments:
+            if (comment.get("user") or {}).get("login", "") != TRUSTED_COMMENT_AUTHOR:
+                continue
+            body = comment.get("body", "") or ""
+            source = next((lbl for mk, lbl in _PR_COMMENT_MARKERS.items() if mk in body), None)
+            if source is None:
+                continue
+            saw_marker = True
+            parsed = parse_review_comment(body, source)
+            if parsed["status"] == "skipped-infra":
+                notes.append(
+                    f"{source} did not review #{number} — the reviewer reported itself "
+                    "skipped, so that PR merged with no review from this provider"
+                )
+                continue
+            if parsed["status"] == "drift":
+                notes.append(
+                    f"{source}'s comment on #{number} carries the reviewer marker but has "
+                    "no '## Security findings' section — the reviewer's output format has "
+                    "drifted and its findings were NOT ingested"
+                )
+                continue
+            if parsed["unparsed"]:
+                notes.append(
+                    f"{parsed['unparsed']} unreadable bullet(s) in {source}'s comment on "
+                    f"#{number} — not filed"
+                )
+            for finding in parsed["findings"]:
+                finding["sources"] = [f"PR-time {source} review of #{number}"]
+            findings.extend(parsed["findings"])
+        if not saw_marker:
+            notes.append(f"no adversarial-review comment found on #{number}")
+
+    # Cap, highest severity first. Required because a caller may set
+    # severity_floor: LOW (rolliq-com/operations does), which puts both reviewers'
+    # MEDIUM and LOW bullets in scope on every merge — plausibly dozens of issues on
+    # the first run after this ships. Truncation is loud, never silent.
+    findings.sort(
+        key=lambda f: _SEVERITY_ORDER.index(f["severity"]) if f.get("severity") in _SEVERITY_ORDER else 0,
+        reverse=True,
+    )
+    if len(findings) > _MAX_PR_FINDINGS_PER_RUN:
+        notes.append(
+            f"ingested PR-time findings capped at {_MAX_PR_FINDINGS_PER_RUN} of "
+            f"{len(findings)} parsed (lowest severities dropped) — raise "
+            "_MAX_PR_FINDINGS_PER_RUN or raise the caller's severity_floor"
+        )
+        findings = findings[:_MAX_PR_FINDINGS_PER_RUN]
+    return findings, notes
 
 # ── Board intake (Projects v2) ──────────────────────────────────────────────────
 #
@@ -966,10 +1507,17 @@ def issue_title(finding: dict) -> str:
 
 
 def issue_body(finding: dict, merge_sha: str, repo: str, run_url: str) -> str:
+    # Which reviewer(s) actually raised this. A finding can now arrive through two
+    # doors — a PR-time reviewer's own comment, or this action's post-merge pass — and
+    # merge_candidates() collapses both into one issue, so the body is the only place
+    # that records how many independent reviewers saw it. Two named sources here is a
+    # materially stronger signal than one.
+    sources = finding.get("sources") or ["post-merge review pass"]
     return "\n".join([
         f"## {finding['severity']} severity finding",
         "",
         "**Source:** `adversarial-ai` (captured on merge)",
+        f"**Reported by:** {'; '.join(sources)}",
         f"**Location:** `{finding['location']}`",
         f"**Category:** {finding['category']}",
         f"**Merge commit:** [`{merge_sha[:12]}`](https://github.com/{repo}/commit/{merge_sha})",
@@ -1116,6 +1664,39 @@ def upsert_digest(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _exit_with(criticals_new: int, criticals_tracked: int, model_error: Exception | None) -> None:
+    """The single place this module decides its exit code.
+
+    Two independent reasons to go red, and both must be honoured even when the other
+    is absent:
+
+    * A CRITICAL seen in this diff, whether newly filed or already tracked as an open
+      issue — an unresolved CRITICAL demands attention on every merge until it is
+      fixed or explicitly suppressed.
+    * The post-merge review pass not having run at all. A diff that was never reviewed
+      must never read as clean, and it can now reach this point because that failure
+      no longer aborts main() before the PR-time findings are filed.
+    """
+    criticals_total = criticals_new + criticals_tracked
+    if criticals_total:
+        print(
+            f"ERROR: {criticals_total} CRITICAL finding(s) in this diff "
+            f"({criticals_new} new issue(s) filed, "
+            f"{criticals_tracked} already tracked). "
+            "Resolve or suppress before this workflow will pass.",
+            file=sys.stderr,
+        )
+    if model_error is not None:
+        print(
+            f"ERROR: the merged diff was not re-reviewed post-merge ({model_error}). "
+            "Any PR-time reviewer findings were still filed, but this diff has NOT had "
+            "a post-merge review — not treating it as clean.",
+            file=sys.stderr,
+        )
+    if criticals_total or model_error is not None:
+        sys.exit(1)
+
+
 def main() -> None:
     api_key = os.environ.get("REVIEW_API_KEY", "")
     token = os.environ.get("GITHUB_TOKEN", "")
@@ -1156,12 +1737,67 @@ def main() -> None:
         print(f"  Loaded {len(suppressions)} suppression(s)")
 
     context = get_repo_context()
-    raw = review_diff(api_key, diff, context, build_suppression_context(suppressions))
-    findings = parse_findings(raw)
-    print(f"  Parsed {len(findings)} finding(s)")
+
+    # ── Source 1: what the PR-time reviewers already found ────────────────────
+    # Runs first, and inside its own try, for two reasons. It must not be able to
+    # sink a run that files findings today (this is new code on a moving tag that
+    # reaches every caller at once), and its findings must survive the post-merge
+    # pass failing below.
+    pr_findings: list[dict] = []
+    ingest_notes: list[str] = []
+    if os.environ.get("INGEST_PR_REVIEWS", "true").strip().lower() not in ("false", "0", "no"):
+        tokens = [("job GITHUB_TOKEN", token), ("app token", board_token)]
+        try:
+            pr_findings, ingest_notes = ingest_pr_review_findings(repo, before, after, tokens)
+            print(f"  Ingested {len(pr_findings)} finding(s) from PR-time review comments")
+        except Exception as exc:  # noqa: BLE001 — an ingest bug must never sink capture
+            ingest_notes = [f"PR-time ingest failed unexpectedly: {exc}"]
+            print(f"WARNING: PR-time ingest failed: {exc}", file=sys.stderr)
+    else:
+        print("  PR-time ingest disabled by INGEST_PR_REVIEWS")
+
+    for note in ingest_notes:
+        print(f"WARNING: PR-time ingest — {note}", file=sys.stderr)
+    if ingest_notes:
+        _step_summary(
+            "### ⚠️ PR-time reviewer findings partially ingested\n\n"
+            + "\n".join(f"- {n}" for n in ingest_notes)
+            + "\n\nFindings raised only by a PR-time reviewer may be missing from this run.\n"
+        )
+
+    # ── Source 2: this action's own post-merge review pass ────────────────────
+    # review_diff() raises on an empty or truncated completion — correctly, since a
+    # truncated review must never read as clean. But raising out of main() meant NO
+    # issue was filed at all, including the PR-time findings above, which are already
+    # computed and cost nothing to file. Measured live on 2026-09-01: a 4096-token
+    # budget under a thinking-capable model failed exactly this way on two
+    # rolliq-com/operations PRs. Catch it, file what we have, and carry the failure to
+    # the single exit below so the run still goes red — an unreviewed diff must never
+    # read as clean.
+    findings: list[dict] = []
+    model_error: Exception | None = None
+    try:
+        raw = review_diff(api_key, diff, context, build_suppression_context(suppressions))
+        findings = parse_findings(raw)
+        print(f"  Parsed {len(findings)} finding(s) from the post-merge review pass")
+    except Exception as exc:  # noqa: BLE001 — carried to the exit below, never swallowed
+        model_error = exc
+        print(
+            f"ERROR: post-merge review pass did not run: {exc} — "
+            "filing PR-time findings only; this run will still fail.",
+            file=sys.stderr,
+        )
+        _step_summary(
+            f"### ❌ Post-merge review pass did not run\n\n`{exc}`\n\n"
+            "The merged diff was NOT re-reviewed. Any PR-time reviewer findings were "
+            "still filed.\n"
+        )
+
+    candidates = merge_candidates(pr_findings, findings)
+    print(f"  {len(candidates)} candidate(s) after merging both sources")
 
     kept = []
-    for f in findings:
+    for f in candidates:
         if _SUPPRESSION_LOC_RE.search(f.get("location", "")):
             print(f"  Skipped (suppression-file location): {f['title'][:60]}")
             continue
@@ -1173,6 +1809,9 @@ def main() -> None:
 
     if not kept:
         print("No findings to capture after suppressions.")
+        # Not a bare return: if the post-merge pass never ran, "nothing to file" is
+        # not the same as "nothing to find", and the run must still go red.
+        _exit_with(0, 0, model_error)
         return
 
     ensure_labels(token, repo)
@@ -1218,9 +1857,19 @@ def main() -> None:
             digest_findings.append(finding)
             continue
         labels = ["security", f"severity:{sev.lower()}", "source:adversarial-ai"]
+        if any(str(s).startswith("PR-time ") for s in finding.get("sources") or []):
+            labels.append("source:pr-review")
         body = issue_body(finding, after, repo, run_url)
         print(f"  Creating [{sev}] {title[:80]}")
         created_issue = create_issue(token, repo, title, body, labels)
+        # Feed the dedupe sets as we go. They were built once from already-open issues
+        # and never updated, so two findings resolving to the same location inside a
+        # SINGLE run both got filed. merge_candidates() collapses most such pairs
+        # before this loop, but not all — a location key is derived from the sanitised
+        # title, which the merge key deliberately ignores.
+        existing.add(title)
+        if loc_key:
+            existing_location_keys.add(loc_key)
         created += 1
         if sev == "CRITICAL":
             criticals_new += 1
@@ -1249,18 +1898,7 @@ def main() -> None:
         f"{' (new digest issue)' if digest_issues else ''}. "
         f"CRITICALs: {criticals_new} new, {criticals_already_tracked} already tracked."
     )
-    if criticals_total:
-        # Exit non-zero for any CRITICAL seen in this diff — whether newly filed or
-        # already tracked as an open issue. An unresolved CRITICAL demands attention
-        # on every merge until it is fixed or explicitly suppressed.
-        print(
-            f"ERROR: {criticals_total} CRITICAL finding(s) in this diff "
-            f"({criticals_new} new issue(s) filed, "
-            f"{criticals_already_tracked} already tracked). "
-            "Resolve or suppress before this workflow will pass.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    _exit_with(criticals_new, criticals_already_tracked, model_error)
 
 
 if __name__ == "__main__":

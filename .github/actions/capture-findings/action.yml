@@ -33,13 +33,27 @@ inputs:
     default: ""
   board-app-token:
     description: >-
-      App installation token carrying `organization_projects: write`, used only to add a newly
-      filed HIGH finding to the org's GitHub Project Inbox (infra-commons/meta#661). Empty by
-      default — a newly-filed HIGH just isn't board-added, nothing else changes. `github-token`
-      above cannot do this itself: org-level Projects v2 mutations need an App/PAT token, which no
-      `permissions:` block can grant to a default Actions token.
+      App installation token, used for two things. (1) `organization_projects: write` adds a newly
+      filed HIGH finding to the org's GitHub Project Inbox (infra-commons/meta#661) — `github-token`
+      above cannot do this itself, because org-level Projects v2 mutations need an App/PAT token,
+      which no `permissions:` block can grant to a default Actions token. (2) `pull_requests: read`
+      is the FALLBACK credential for reading the PR-time reviewers' comments
+      (infra-commons/meta#1187), tried only after `github-token`; the job token is capped by the
+      caller's own `permissions:` block and typically cannot read pull requests. Empty by default —
+      a newly-filed HIGH just isn't board-added, and PR-comment reads fall back to commit-subject
+      resolution. Deliberately NOT renamed despite now serving both: the composite ships on a moving
+      tag while the reusable is SHA-pinned per caller, so old-reusable/new-composite and
+      new-reusable/old-composite must both keep working.
     required: false
     default: ""
+  ingest-pr-reviews:
+    description: >-
+      Set "false" to disable ingesting findings from the PR-time adversarial-review comments
+      (infra-commons/meta#1187) and review only the merged diff, as this action did before. Any
+      other value leaves the ingest on. An escape hatch for a caller hit by reviewer format drift;
+      turning it off restores the single-model gap the ingest exists to close.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -68,4 +82,5 @@ runs:
         RUN_URL: ${{ inputs.run-url }}
         INDIVIDUAL_SEVERITY_FLOOR: ${{ inputs.severity-floor }}
         BOARD_APP_TOKEN: ${{ inputs.board-app-token }}
+        INGEST_PR_REVIEWS: ${{ inputs.ingest-pr-reviews }}
       run: python "$GITHUB_ACTION_PATH/capture.py"
