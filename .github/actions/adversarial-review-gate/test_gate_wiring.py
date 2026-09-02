@@ -240,20 +240,34 @@ def test_the_quota_recorder_has_no_unlabeled_fallback():
 # was ever filed, and the gate therefore never converged on "marker open →
 # block" — every subsequent run repeated the same broken attempt.
 #
-# The cause was one missing flag. The `gate` job has NO `actions/checkout` step
-# (it does not need the source — it reads job outputs and files issues), so
-# GITHUB_WORKSPACE is an empty directory. `gh` resolves its target repo from
-# `--repo`, then `GH_REPO`, then the git remotes of the working directory; with
-# no flag, no `GH_REPO` in this job's env, and no checkout, it finds none and
-# dies with "not a git repository". On the `gh label create` calls that error
-# was swallowed by their trailing `|| true` (correct on its own terms — a label
-# that already exists must not fail the step), so the label was silently never
-# created and the *next* command, `gh issue create --label "$LABEL"`, failed on
-# a label that nothing had provisioned.
+# ONE of the two causes was a missing flag. The `gate` job has NO
+# `actions/checkout` step (it does not need the source — it reads job outputs
+# and files issues), so GITHUB_WORKSPACE is an empty directory. `gh` resolves
+# its target repo from `--repo`, then `GH_REPO`, then the git remotes of the
+# working directory; with no flag, no `GH_REPO` in this job's env, and no
+# checkout, it finds none and dies with "not a git repository". On the
+# `gh label create` calls that error was swallowed by their trailing `|| true`,
+# so the label was silently never created and the *next* command,
+# `gh issue create --label "$LABEL"`, failed on a label nothing had provisioned.
 #
 # Every other `gh` call in these steps already passed `--repo "$REPO"`; the
 # three label creates were the only ones that did not, which is why this read as
-# a permissions or provisioning problem rather than the one-flag omission it was.
+# a permissions or provisioning problem rather than the one-flag omission.
+#
+# CORRECTION (infra-commons/security#149). This comment used to say "the cause
+# was one missing flag", and #135 fixed on that basis. It was not the whole
+# cause: the same three calls also passed a `--description` of 172/142/142
+# characters against GitHub's 100-character cap, so each returned a 422 and
+# created nothing whether or not `--repo` was present. That had been true since
+# #80/#99 added the descriptions, so these creates had never once succeeded on
+# any repo, and #135 could not have restored the label. Both causes reach the
+# same end state — label absent, labelled create fails, no marker filed — which
+# is why the single-cause account looked complete. It also means the defect was
+# unreachable code in the canonical workflow, NOT a provisioning gap in the
+# caller repos: no caller was ever required to hand-create these labels, and
+# hand-creating them is what masked the defect wherever it had been done. The
+# second cause is now covered by
+# `test_each_provisioned_label_description_is_within_githubs_limit` below.
 #
 # This is asserted over every `gh`-using step rather than a fixed list, so a
 # step added later is covered without anyone remembering to extend this test.
@@ -338,3 +352,79 @@ def test_the_quota_recorders_hard_fail_path_says_why_it_is_failing():
         "does not fall back"
     )
     assert "exit 1" in code, "the failure branch must still fail the step"
+
+
+# ── the label creates must be calls GitHub will actually accept ───────────────
+#
+# infra-commons/security#149: `--repo` was ONE of two independent causes of
+# #1092/#1094, and #135 fixed only that one. All three of these calls also
+# passed a `--description` of 172/142/142 characters against GitHub's
+# 100-character cap, so each returned a 422 and created nothing regardless of
+# `--repo`. The descriptions were over the cap from the day they landed
+# (366933b/#80: 172; ab86114/#99: 142 and 142), so these creates had never once
+# succeeded on any repo, and `--repo` alone could not have restored the label.
+# Both causes reach the same end state — label absent, the labelled create below
+# fails, no marker filed — which is why the first attribution looked complete.
+# That end state was unreachable code in THIS workflow, not a provisioning gap
+# in the caller repos; hand-creating the label is what masked it where it had
+# been done. Asserted statically rather than left to the runtime warning below
+# because the failure is 100% deterministic: it belongs at PR time.
+_LABEL_DESCRIPTION_LIMIT = 100
+_LABEL_CREATE_RE = re.compile(r"gh label create\b[^\n]*")
+_DESCRIPTION_RE = re.compile(r'--description\s+"([^"]*)"')
+
+_RECORDING_STEPS = [
+    "Record that the provider quota is exhausted",
+    "Record a degraded pass",
+    "Create tracking issue for critical findings",
+]
+
+
+def _joined_shell(run: str) -> str:
+    """`_shell_code` with line continuations folded, so one command is one line.
+
+    The `--description` these tests read sits on a continuation line, and the
+    command regexes below are deliberately `[^\\n]*` rather than `.*?` with
+    DOTALL so a match can never run from one command into the next.
+    """
+    return re.sub(r"\\\n\s*", " ", _shell_code(run))
+
+
+@pytest.mark.parametrize("step_name", _RECORDING_STEPS)
+def test_each_provisioned_label_description_is_within_githubs_limit(step_name):
+    creates = _LABEL_CREATE_RE.findall(_joined_shell(_step_run(step_name)))
+    assert creates, f"{step_name!r} makes no label-create call to check"
+    for create in creates:
+        for description in _DESCRIPTION_RE.findall(create):
+            assert len(description) <= _LABEL_DESCRIPTION_LIMIT, (
+                f"{step_name!r} asks for a {len(description)}-character label "
+                f"description; GitHub rejects anything over "
+                f"{_LABEL_DESCRIPTION_LIMIT} with a 422, so the label is never "
+                f"provisioned and the labelled create below it then fails on a "
+                f"label that does not exist: {description!r}"
+            )
+
+
+# Failing OPEN on this call is deliberate and stays: with `--force` it is a
+# create-or-update, so on a repo that already has the label the call is
+# redundant and a transient blip on it must not fail a required check; and where
+# the label genuinely is absent, the labelled create two commands down already
+# fails loudly and specifically. Failing open is not a licence to be SILENT,
+# though. `>/dev/null 2>&1 || true` is what let a 100%-reproducible 422 run
+# unnoticed on every repo for months, and it makes the quota recorder's own
+# ::error:: — which tells the reader to "check that the label create above
+# succeeded" — impossible to act on.
+@pytest.mark.parametrize("step_name", _RECORDING_STEPS)
+def test_a_failed_label_create_is_announced_rather_than_discarded(step_name):
+    code = _joined_shell(_step_run(step_name))
+    create = _LABEL_CREATE_RE.search(code)
+    assert create, f"{step_name!r} makes no label-create call to check"
+    assert "/dev/null" not in create.group(0), (
+        f"{step_name!r} discards its label create's output, so a failure to "
+        f"provision the label leaves no trace anywhere in the run — the state "
+        f"that hid a 422 on every repo for months"
+    )
+    assert "::warning::" in code, (
+        f"{step_name!r} does not annotate a failed label create. Fail-open here "
+        f"is correct; failing open silently is not"
+    )
