@@ -279,24 +279,45 @@ jobs:
           TITLE="[security] Adversarial review: provider quota exhausted"
 
           # Best-effort and idempotent (--force updates rather than errors on a
-          # label that already exists). Its failure must not stop the create
-          # below from being attempted — a repo that already has this label
-          # (e.g. from a prior run) must not depend on this call succeeding.
+          # label that already exists), and deliberately NOT fatal: on a repo
+          # that already has this label (e.g. from a prior run) a failure here
+          # changes nothing, so failing a required check for it would block a PR
+          # this step was only meant to annotate. Where the label genuinely is
+          # absent, the labelled issue-create below hard-fails with a specific
+          # ::error:: naming it. What this call does owe is a STATEMENT that it
+          # failed: that ::error:: tells the reader to check whether this
+          # succeeded, and the `>/dev/null 2>&1 || true` this replaces made that
+          # instruction impossible to follow. Stderr is folded onto one line
+          # because a captured line beginning `::` would be re-parsed by the
+          # runner as its own workflow command.
           #
           # `--repo "$REPO"` is load-bearing, not decoration: this job has no
           # `actions/checkout`, so `gh` has no git remote to infer a target from
           # and (with no GH_REPO in this step's env) dies with "not a git
-          # repository". The `|| true` above then swallows that error, the label
-          # is never created, and the labelled issue-create below fails with
-          # `could not add label: '<label>' not found` — a message that reads
-          # like a provisioning or permissions problem in the caller repo and is
-          # neither. That was infra-commons/meta#1092/#1094 (2026-08-27), where
-          # the quota marker was never filed at all, so the next run's lookup
-          # found nothing open and the escalation never converged. Asserted by
+          # repository". The label is then never created and the labelled
+          # issue-create below fails with `could not add label: '<label>' not
+          # found` — a message that reads like a provisioning or permissions
+          # problem in the caller repo and is neither. That was
+          # infra-commons/meta#1092/#1094 (2026-08-27), where the quota marker
+          # was never filed at all, so the next run's lookup found nothing open
+          # and the escalation never converged. Asserted by
           # test_every_gh_call_in_the_gate_job_names_the_repo_explicitly.
-          gh label create "$LABEL" --repo "$REPO" --color D93F0B \
-            --description "Applied only by the adversarial-review gate's own token. Both the dedupe below and the next run's lookup depend on an issue's author being unable to attach this themselves." \
-            --force >/dev/null 2>&1 || true
+          #
+          # CORRECTION (infra-commons/security#149): the missing flag was ONE of
+          # two independent causes, and #135 fixed only it. The `--description`
+          # below ran to 172 characters against GitHub's 100-character cap, so
+          # this call returned a 422 and created nothing regardless of `--repo`
+          # — and had done since #80/#99 added the descriptions, so it had never
+          # once succeeded on any repo. Both causes reach the same end state,
+          # which is why the first attribution read as complete; this was
+          # unreachable code HERE, not a provisioning gap in the caller org.
+          # Now asserted by
+          # test_each_provisioned_label_description_is_within_githubs_limit.
+          if ! LABEL_ERR=$(gh label create "$LABEL" --repo "$REPO" --color D93F0B \
+            --description "Applied only by the adversarial-review gate's own token; its dedupe and lookup depend on that." \
+            --force 2>&1); then
+            echo "::warning::Could not provision the ${LABEL} label on ${REPO}: ${LABEL_ERR//$'\n'/ }"
+          fi
 
           EXISTING=$(gh issue list --repo "$REPO" \
             --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
@@ -378,10 +399,21 @@ jobs:
 
           # Best-effort and idempotent (--force updates rather than errors on a
           # label that already exists). Its failure must never block the durable
-          # record below — see the fallback `gh issue create` at the bottom.
-          gh label create "$LABEL" --repo "$REPO" --color 5319E7 \
-            --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
-            --force >/dev/null 2>&1 || true
+          # record below — see the fallback `gh issue create` at the bottom —
+          # but it must not be SILENT either. This description used to run to
+          # 142 characters against GitHub's 100-character cap, so the call
+          # returned a 422 and created nothing on every repo and every run,
+          # while `>/dev/null 2>&1 || true` discarded the one string that said
+          # so; the label-gated dedupe below was then inert and this step filed
+          # a fresh unlabelled issue per RUN rather than per PR
+          # (infra-commons/security#149 — see the quota recorder above for the
+          # full correction). Stderr is folded onto one line because a captured
+          # line beginning `::` would be re-parsed as its own workflow command.
+          if ! LABEL_ERR=$(gh label create "$LABEL" --repo "$REPO" --color 5319E7 \
+            --description "Applied only by the adversarial-review gate's own token; its dedupe depends on that." \
+            --force 2>&1); then
+            echo "::warning::Could not provision the ${LABEL} label on ${REPO}: ${LABEL_ERR//$'\n'/ }"
+          fi
 
           EXISTING=$(gh issue list --repo "$REPO" \
             --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
@@ -417,9 +449,14 @@ jobs:
           LABEL="security:critical-findings"
           TITLE="[security] Critical findings on PR #${PR_NUMBER}"
 
-          gh label create "$LABEL" --repo "$REPO" --color B60205 \
-            --description "Applied only by the adversarial-review gate's own token. The dedupe below depends on an issue's author being unable to attach this themselves." \
-            --force >/dev/null 2>&1 || true
+          # Best-effort, idempotent and non-fatal for the same reasons as the two
+          # steps above, and — since infra-commons/security#149 — under the same
+          # 100-character description cap and no longer silent when it fails.
+          if ! LABEL_ERR=$(gh label create "$LABEL" --repo "$REPO" --color B60205 \
+            --description "Applied only by the adversarial-review gate's own token; its dedupe depends on that." \
+            --force 2>&1); then
+            echo "::warning::Could not provision the ${LABEL} label on ${REPO}: ${LABEL_ERR//$'\n'/ }"
+          fi
 
           EXISTING=$(gh issue list --repo "$REPO" \
             --search "\"${TITLE}\" in:title label:\"${LABEL}\"" \
