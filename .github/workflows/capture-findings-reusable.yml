@@ -141,8 +141,11 @@ jobs:
           # at all — only the pin bump any change to this file needs.
           #
           # capture.py tries `github.token` FIRST and falls back to this, so a caller still on an
-          # older pin degrades to commit-subject PR resolution rather than breaking. It reports
-          # which credential won in the job summary.
+          # older pin degrades to commit-subject PR resolution rather than breaking. The winning
+          # credential is named in the "PR resolution" row of the job summary's capture receipt —
+          # which credential can read pull requests here is a per-caller fact that only a live 200
+          # answers. That was described here before it was implemented: _get_json() returned on the
+          # first 200 without the label, so no run ever reported it.
           permission-pull-requests: read
 
       # Pinned to the capture-findings/v1 moving tag, not a raw SHA: a capture.py fix

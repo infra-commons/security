@@ -94,7 +94,7 @@ def test_the_dead_model_pass_is_reported_in_the_job_summary(monkeypatch, harness
     ))
     with pytest.raises(SystemExit):
         capture.main()
-    assert "Post-merge review pass did not run" in summary.read_text()
+    assert "Post-merge review pass did not" in summary.read_text()
 
 
 def test_model_failure_with_no_findings_at_all_still_exits_nonzero(monkeypatch, harness):
@@ -117,10 +117,10 @@ def test_an_ingest_fault_does_not_sink_the_run(monkeypatch, harness):
         ValueError("something in the ingest broke")
     ))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([
         {"severity": "HIGH", "location": "src/x.py:1", "title": "Real",
          "description": "Real", "category": "auth"},
-    ])
+    ], 0))
 
     capture.main()  # must not raise
 
@@ -136,7 +136,7 @@ def test_ingest_notes_reach_stderr_and_the_job_summary(monkeypatch, harness, cap
         lambda *a: ([], ["could not read comments on #7 (GET ...: HTTP 403)"]),
     )
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [])
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
 
     capture.main()
 
@@ -152,7 +152,7 @@ def test_ingest_can_be_switched_off(monkeypatch, harness):
         lambda *a: called.append(1) or ([], []),
     )
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [])
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
     capture.main()
     assert called == []
 
@@ -161,7 +161,7 @@ def test_ingested_findings_carry_the_pr_review_label(monkeypatch, harness):
     created, _ = harness
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([_pr_high()], []))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [])
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
     capture.main()
     labels = created[0]["labels"]
     assert "source:pr-review" in labels
@@ -172,10 +172,10 @@ def test_post_merge_only_findings_do_not_get_the_pr_review_label(monkeypatch, ha
     created, _ = harness
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([
         {"severity": "HIGH", "location": "src/x.py:1", "title": "Real",
          "description": "Real", "category": "auth"},
-    ])
+    ], 0))
     capture.main()
     assert "source:pr-review" not in created[0]["labels"]
 
@@ -191,12 +191,12 @@ def test_two_findings_at_one_location_file_a_single_issue(monkeypatch, harness):
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
     # Same severity+location, different titles — so merge_candidates keeps one, and
     # the in-loop dedupe sets are what stop a second issue if it ever does not.
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([
         {"severity": "HIGH", "location": "src/x.py:1", "title": "First",
          "description": "First", "category": "auth"},
         {"severity": "HIGH", "location": "src/x.py:1", "title": "Second",
          "description": "Second", "category": "auth"},
-    ])
+    ], 0))
     capture.main()
     assert len(created) == 1
 
@@ -208,7 +208,7 @@ def test_in_loop_dedupe_stops_a_duplicate_the_merge_did_not_catch(monkeypatch, h
             "description": "Dup", "category": "auth"}
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [dict(same), dict(same)])
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([dict(same), dict(same)], 0))
     monkeypatch.setattr(capture, "merge_candidates", lambda pr, model: list(model))
     capture.main()
     assert len(created) == 1
@@ -218,10 +218,10 @@ def test_a_critical_still_exits_nonzero(monkeypatch, harness):
     created, _ = harness
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([
         {"severity": "CRITICAL", "location": "src/x.py:1", "title": "Boom",
          "description": "Boom", "category": "rce"},
-    ])
+    ], 0))
     with pytest.raises(SystemExit) as exc:
         capture.main()
     assert exc.value.code == 1
@@ -231,5 +231,100 @@ def test_a_critical_still_exits_nonzero(monkeypatch, harness):
 def test_a_clean_run_exits_zero(monkeypatch, harness):
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
     monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
-    monkeypatch.setattr(capture, "parse_findings", lambda raw: [])
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
     capture.main()  # must not raise
+
+
+# ── The receipt ─────────────────────────────────────────────────────────────────
+#
+# Before 2026-09-02 a run that reviewed and found nothing, a run whose parse
+# silently failed, and a run that returned before reviewing were indistinguishable:
+# all three a green check, an empty summary, no issue. A zero that cannot be told
+# apart from a skip is what let that run unnoticed for months.
+
+def test_a_zero_finding_run_says_it_ran_and_found_nothing(monkeypatch, harness):
+    _, summary = harness
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
+
+    capture.main()
+
+    text = summary.read_text()
+    assert "Capture receipt" in text
+    assert "ran, output parsed" in text
+    assert "| Findings parsed | 0 |" in text
+
+
+def test_a_branch_creation_run_says_it_was_skipped(monkeypatch, harness):
+    """"Never ran" must not render as "ran and found nothing"."""
+    _, summary = harness
+    monkeypatch.setenv("BEFORE_SHA", "0" * 40)
+
+    capture.main()
+
+    text = summary.read_text()
+    assert "skipped: branch creation" in text
+    assert "ran, output parsed" not in text
+
+
+def test_an_empty_diff_run_says_it_was_skipped(monkeypatch, harness):
+    _, summary = harness
+    monkeypatch.setattr(capture, "get_diff", lambda b, a: "   \n")
+
+    capture.main()
+
+    assert "skipped: empty diff" in summary.read_text()
+
+
+def test_an_unparseable_review_fails_closed_and_says_so(monkeypatch, harness):
+    """The headline behaviour change: a review the parser could not read goes red."""
+    created, summary = harness
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
+    monkeypatch.setattr(
+        capture, "review_diff",
+        lambda *a: "I reviewed the diff and found nothing of concern.",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        capture.main()
+
+    assert exc.value.code == 1, "an unreadable review must never read as clean"
+    assert created == []
+    text = summary.read_text()
+    assert "could not be parsed" in text
+
+
+def test_the_receipt_carries_the_counts(monkeypatch, harness):
+    _, summary = harness
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([_pr_high()], []))
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([
+        {"severity": "HIGH", "location": "src/x.py:1", "title": "Real",
+         "description": "Real", "category": "auth"},
+    ], 2))
+
+    capture.main()
+
+    text = summary.read_text()
+    assert "| Findings ingested | 1 |" in text
+    assert "| Issues filed | 2 |" in text
+    # The drop count is the instrumentation that makes `Parsed 0` interpretable.
+    assert "| Dropped (unusable severity) | 2 |" in text
+
+
+def test_the_receipt_names_the_credential_that_resolved_the_prs(monkeypatch, harness):
+    """The reusable's comment claimed this for a while before the code did it."""
+    _, summary = harness
+
+    def _ingest(repo, before, after, tokens, receipt=None):
+        receipt["pr_method"] = "commits/{sha}/pulls as app token"
+        return [], []
+
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", _ingest)
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
+
+    capture.main()
+
+    assert "as app token" in summary.read_text()

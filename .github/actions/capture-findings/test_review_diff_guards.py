@@ -116,3 +116,68 @@ def test_review_diff_raises_when_the_response_is_thinking_only(monkeypatch):
     _fake_anthropic(monkeypatch, content_blocks=[_thinking_block()])
     with pytest.raises(RuntimeError, match="empty completion"):
         capture.review_diff("k", "diff", "ctx", "")
+
+
+# ── parse_findings: the other half of the same guard ────────────────────────────
+#
+# review_diff() has failed closed on an empty/truncated completion since
+# security#109. parse_findings() did not: both failure paths returned `[]` after a
+# stderr warning, which downstream reads as a clean review. On 2026-09-02 meta#1280
+# merged carrying a HIGH and a MEDIUM both PR-time reviewers had reported, and this
+# pass logged `Parsed 0` and filed nothing — a genuine zero nothing could confirm.
+
+def test_output_with_no_json_object_raises():
+    with pytest.raises(capture.ReviewParseError, match="no JSON object"):
+        capture.parse_findings("I reviewed the diff and found nothing of concern.")
+
+
+def test_malformed_json_raises():
+    with pytest.raises(capture.ReviewParseError, match="JSON parse error"):
+        capture.parse_findings('{"findings": [ {"severity": "HIGH",, } ]}')
+
+
+def test_an_object_without_a_findings_list_raises():
+    # SYSTEM_PROMPT is explicit that an empty result is `{"findings": []}`, so an
+    # object lacking the key means the model answered a different question.
+    with pytest.raises(capture.ReviewParseError, match="no `findings` list"):
+        capture.parse_findings('{"summary": "looks fine"}')
+
+
+def test_an_explicitly_empty_findings_list_is_not_an_error():
+    """The one shape that legitimately means "reviewed, nothing found"."""
+    findings, dropped = capture.parse_findings('{"findings": []}')
+    assert findings == []
+    assert dropped == 0
+
+
+def test_prose_containing_a_brace_before_the_json_is_rescued():
+    """The recoverable shape that must NOT go red: the greedy slice dies here, and
+    failing closed on it would red-run every caller over a brace in a preamble."""
+    text = (
+        'Note: the workflow interpolates an expression unsafely: {0} is unquoted.\n'
+        '{"findings": [{"severity": "HIGH", "location": "a.py:1", '
+        '"title": "t", "description": "d", "category": "injection"}]}'
+    )
+    findings, dropped = capture.parse_findings(text)
+    assert [f["severity"] for f in findings] == ["HIGH"]
+    assert dropped == 0
+
+
+def test_a_code_fenced_object_still_parses():
+    findings, _ = capture.parse_findings('```json\n{"findings": []}\n```')
+    assert findings == []
+
+
+def test_an_unusable_severity_is_dropped_and_counted():
+    """The count is the instrumentation: without it, `{"findings": []}` and a list
+    whose severities were all rejected both render as `Parsed 0`."""
+    text = (
+        '{"findings": ['
+        '{"severity": "INFO", "location": "a.py:1", "title": "t", '
+        '"description": "d", "category": "infra"},'
+        '{"severity": "HIGH", "location": "b.py:2", "title": "u", '
+        '"description": "d", "category": "infra"}]}'
+    )
+    findings, dropped = capture.parse_findings(text)
+    assert [f["severity"] for f in findings] == ["HIGH"]
+    assert dropped == 1
