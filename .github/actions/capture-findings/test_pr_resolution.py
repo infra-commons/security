@@ -140,17 +140,20 @@ def test_chain_falls_through_403_to_the_next_token(monkeypatch):
         capture.httpx, "Client",
         _fake_client([_Resp(403), _Resp(200, [{"number": 7}])]),
     )
-    payload, reason = capture._get_json(
+    payload, reason, label = capture._get_json(
         "/x", {}, [("job GITHUB_TOKEN", "t1"), ("app token", "t2")]
     )
     assert payload == [{"number": 7}]
     assert reason is None
+    # The winning label is the whole point of the chain: which credential can read
+    # pull requests is a per-caller fact only a live 200 answers.
+    assert label == "app token"
 
 
 def test_chain_exhausted_names_every_credential_it_tried(monkeypatch):
     """The reason string is what a human reads to find out why nothing was ingested."""
     monkeypatch.setattr(capture.httpx, "Client", _fake_client([_Resp(403), _Resp(404)]))
-    payload, reason = capture._get_json(
+    payload, reason, label = capture._get_json(
         "/repos/o/r/commits/abc/pulls", {},
         [("job GITHUB_TOKEN", "t1"), ("app token", "t2")],
     )
@@ -158,12 +161,13 @@ def test_chain_exhausted_names_every_credential_it_tried(monkeypatch):
     assert "job GITHUB_TOKEN: HTTP 403" in reason
     assert "app token: HTTP 404" in reason
     assert "/repos/o/r/commits/abc/pulls" in reason
+    assert label is None
 
 
 def test_server_error_stops_the_chain(monkeypatch):
     """A 5xx is not a permissions answer — retrying with another token proves nothing."""
     monkeypatch.setattr(capture.httpx, "Client", _fake_client([_Resp(500)]))
-    payload, reason = capture._get_json(
+    payload, reason, _ = capture._get_json(
         "/x", {}, [("job GITHUB_TOKEN", "t1"), ("app token", "t2")]
     )
     assert payload is None
@@ -180,7 +184,9 @@ def test_unmerged_pull_requests_are_dropped(monkeypatch):
     )
     numbers, method = capture.resolve_pull_requests("o/r", [_AFTER], [("job", "t")])
     assert numbers == [5]
-    assert method == "commits/{sha}/pulls"
+    # Credential-bearing: the method names which token actually got the 200.
+    assert method.startswith("commits/{sha}/pulls")
+    assert "as job" in method
 
 
 def test_forbidden_api_falls_back_to_commit_subjects(monkeypatch, capsys):
@@ -198,7 +204,10 @@ def test_forbidden_api_falls_back_to_commit_subjects(monkeypatch, capsys):
     )
     numbers, method = capture.resolve_pull_requests("o/r", [_AFTER], [("job GITHUB_TOKEN", "t")])
     assert numbers == [42]
-    assert method == "commit subjects"
+    assert method.startswith("commit subjects")
+    # The fallback method carries why the API path was refused, so a receipt showing
+    # "commit subjects" says which credential was denied and how.
+    assert "job GITHUB_TOKEN: HTTP 403" in method
     assert "falling back to commit subjects" in capsys.readouterr().err
 
 

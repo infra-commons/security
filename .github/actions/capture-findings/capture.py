@@ -17,7 +17,13 @@ run visibly red and demands attention, but it does not undo the commit.
 
 HIGH/MEDIUM/LOW findings are filed as GitHub issues and the workflow exits 0.
 CRITICAL findings are also filed as issues and the workflow exits 1 — the run
-goes red so a post-merge CRITICAL cannot be silently ignored.
+goes red so a post-merge CRITICAL cannot be silently ignored. The run also goes
+red when the post-merge pass produced no usable review (errored, empty, truncated,
+or unreadable output): a diff that was not reviewed must never read as clean.
+
+Every run writes a receipt to the job summary, including a run that finds nothing,
+so "reviewed and found nothing" is distinguishable from "never ran" and from
+"parsed nothing" — see new_receipt().
 
 Each diff is reviewed exactly once, at merge — never re-audited — so it cannot
 re-sample false positives on unchanged code.
@@ -684,21 +690,81 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
     return content
 
 
-def parse_findings(text: str) -> list[dict]:
-    start = text.find("{")
+class ReviewParseError(RuntimeError):
+    """The post-merge pass returned output that is not a findings object.
+
+    Raised, not returned, so it lands in the same `except` in main() that already
+    carries review_diff()'s guards into `model_error` — one exit path, no third
+    reason to go red. Until 2026-09-02 both failure paths below returned `[]` after
+    a stderr warning, which downstream is byte-identical to a clean review: exit 0,
+    no issue, no summary. security#109 made that fail closed for an empty
+    completion and could not for an unreadable one, two `return []`s away.
+    """
+
+
+# How many `{` offsets to try before giving up. See _findings_object().
+_MAX_JSON_RESCUE_OFFSETS = 3
+
+
+def _findings_object(text: str) -> dict:
+    """The findings object in a completion, or raise ReviewParseError.
+
+    The greedy first-`{`/last-`}` slice stays primary — it tolerates the fences and
+    prose wrappers SYSTEM_PROMPT forbids but models still emit. Its one recoverable
+    failure is prose containing a brace ahead of the real object. That read as clean
+    before, so not rescuing it cost nothing visible; now that it fails the run, not
+    rescuing it would turn a stray brace in a preamble into a red run at every
+    caller at once. Fail closed on a real absence, not on that.
+    """
     end = text.rfind("}")
-    if start == -1 or end <= start:
-        print("Warning: could not extract JSON from review output", file=sys.stderr)
-        return []
-    try:
-        data = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as exc:
-        print(f"Warning: JSON parse error: {exc}", file=sys.stderr)
-        return []
+    starts = [m.start() for m in re.finditer(r"\{", text)][:_MAX_JSON_RESCUE_OFFSETS]
+    detail = "no JSON object in the review output"
+    for start in starts:
+        if end <= start:
+            break
+        try:
+            data = json.loads(text[start:end + 1])
+        except json.JSONDecodeError as exc:
+            detail = f"JSON parse error: {exc}"
+            continue
+        if isinstance(data, dict):
+            return data
+        detail = f"review output decoded to {type(data).__name__}, not an object"
+    # The excerpt is sanitised and short for the same reason every other model-derived
+    # string here is: it renders into the job summary, and the diff it came from is
+    # untrusted input.
+    raise ReviewParseError(f"{detail} (output began: {sanitize(text[:200], 200)!r})")
+
+
+def parse_findings(text: str) -> tuple[list[dict], int]:
+    """(findings, count dropped for an unusable severity).
+
+    The dropped count is returned rather than discarded because it is the one
+    distinction a zero-finding run could not make. On 2026-09-02 meta#1280 merged
+    with a HIGH and a MEDIUM both PR-time reviewers had reported; this pass logged
+    `Parsed 0 finding(s)` and filed nothing. The log proves the JSON decoded, but
+    not whether it was `{"findings": []}` or findings dropped here uncounted.
+    """
+    data = _findings_object(text)
+    raw_findings = data.get("findings")
+    if not isinstance(raw_findings, list):
+        # An object with no `findings` list is not an answer in the mandated schema —
+        # SYSTEM_PROMPT is explicit that an empty result is `{"findings": []}`, so a
+        # missing key means the model answered some other question. Keys only: the
+        # values are untrusted.
+        raise ReviewParseError(
+            "review output has no `findings` list — the model did not answer in the "
+            f"mandated schema (keys: {sorted(map(str, data))[:8]})"
+        )
     findings = []
-    for raw in data.get("findings", []):
+    dropped = 0
+    for raw in raw_findings:
+        if not isinstance(raw, dict):
+            dropped += 1
+            continue
         sev = str(raw.get("severity", "")).upper()
         if sev not in ALLOWED_SEVERITIES:
+            dropped += 1
             continue
         findings.append({
             "severity": sev,
@@ -707,7 +773,7 @@ def parse_findings(text: str) -> list[dict]:
             "description": sanitize(str(raw.get("description", "")), 800),
             "category": sanitize(str(raw.get("category", "unknown")), 50),
         })
-    return findings
+    return findings, dropped
 
 
 # ── GitHub ─────────────────────────────────────────────────────────────────────
@@ -917,19 +983,62 @@ def _step_summary(text: str) -> None:
         print(f"Warning: could not write job summary: {exc}", file=sys.stderr)
 
 
+def new_receipt() -> dict:
+    """The per-run receipt, created before the first early return in main().
+
+    Every run writes one, including a run that finds nothing. Before 2026-09-02 a
+    clean run, a run whose parse failed, and a run that returned before reviewing
+    were indistinguishable — all three a green check, an empty summary, no issue:
+    _step_summary() was wired only to degraded paths, so its ABSENCE said nothing.
+    Counts and status strings only; model output is untrusted.
+    """
+    return {
+        "post_merge": "not started",
+        "parsed": 0,
+        "dropped_severity": 0,
+        "ingest": "not started",
+        "pr_method": "—",
+        "ingested": 0,
+        "suppressed": 0,
+        "filed": 0,
+        "digested": 0,
+    }
+
+
+_RECEIPT_ROWS = (
+    ("post_merge", "Post-merge review pass"),
+    ("parsed", "Findings parsed"),
+    ("dropped_severity", "Dropped (unusable severity)"),
+    ("ingest", "PR-time ingest"),
+    ("pr_method", "PR resolution"),
+    ("ingested", "Findings ingested"),
+    ("suppressed", "Suppressed"),
+    ("filed", "Issues filed"),
+    ("digested", "Digested"),
+)
+
+
+def _receipt_markdown(receipt: dict) -> str:
+    """Render the receipt as a job-summary table."""
+    body = "\n".join(f"| {label} | {receipt[key]} |" for key, label in _RECEIPT_ROWS)
+    return "### Capture receipt\n\n| | |\n|---|---|\n" + body + "\n"
+
+
 def _get_json(path: str, params: dict, tokens: list[tuple[str, str]]):
     """GET an API path, trying each (label, token) in turn.
 
-    Returns (payload, None) on the first 200, or (None, reason) once every credential
-    has been refused. 401/403/404 advance to the next token; any other status stops
-    the chain, because a 5xx is not a permissions answer.
+    Returns (payload, None, winning_label) on the first 200, or (None, reason, None)
+    once every credential has been refused. 401/403/404 advance to the next token;
+    any other status stops the chain, because a 5xx is not a permissions answer.
 
     Why a chain at all: this job's `github.token` is capped by the CALLER's
     permissions block — a called workflow can never hold more than its caller granted,
     and the verified callers grant only `contents: read` + `issues: write`. Which
     credential can read pull requests is therefore a per-caller fact this code cannot
-    know in advance. Naming the credential that won, in the run log, is how the first
-    live run answers it.
+    know in advance. Naming the credential that won is how the first live run answers
+    it — so the winning label is returned, not just the failing ones. It was described
+    here and in the reusable's comment before it was implemented; the label reached no
+    caller because this function returned on the first 200 without it.
     """
     attempts: list[str] = []
     for label, tok in tokens:
@@ -942,13 +1051,13 @@ def _get_json(path: str, params: dict, tokens: list[tuple[str, str]]):
             attempts.append(f"{label}: transport error ({exc})")
             continue
         if resp.status_code == 200:
-            return resp.json(), None
+            return resp.json(), None, label
         attempts.append(f"{label}: HTTP {resp.status_code}")
         if resp.status_code not in (401, 403, 404):
             break
     if not attempts:
-        return None, f"GET {path}: no credential available"
-    return None, f"GET {path}: " + "; ".join(attempts)
+        return None, f"GET {path}: no credential available", None
+    return None, f"GET {path}: " + "; ".join(attempts), None
 
 
 def range_commits(before: str, after: str) -> list[str]:
@@ -1040,7 +1149,7 @@ def _pull_requests_from_subjects(repo: str, commits: list[str], tokens) -> list[
             if candidate in seen or len(seen) >= _MAX_PRS_PER_RUN:
                 continue
             seen.add(candidate)
-            payload, _ = _get_json(f"/repos/{repo}/issues/{candidate}", {}, tokens)
+            payload, _, _ = _get_json(f"/repos/{repo}/issues/{candidate}", {}, tokens)
             if not isinstance(payload, dict):
                 continue
             pr = payload.get("pull_request")
@@ -1054,13 +1163,17 @@ def resolve_pull_requests(repo: str, commits: list[str], tokens) -> tuple[list[i
     numbers: list[int] = []
     seen: set[int] = set()
     api_failure = None
+    winner: str | None = None
     for sha in commits:
         if len(seen) >= _MAX_PRS_PER_RUN:
             break
-        payload, reason = _get_json(f"/repos/{repo}/commits/{sha}/pulls", {"per_page": 100}, tokens)
+        payload, reason, label = _get_json(
+            f"/repos/{repo}/commits/{sha}/pulls", {"per_page": 100}, tokens
+        )
         if payload is None:
             api_failure = reason
             break
+        winner = label or winner
         for pr in payload if isinstance(payload, list) else []:
             if not isinstance(pr, dict):
                 continue
@@ -1072,20 +1185,27 @@ def resolve_pull_requests(repo: str, commits: list[str], tokens) -> tuple[list[i
             if len(seen) >= _MAX_PRS_PER_RUN:
                 break
     if numbers or api_failure is None:
-        return numbers, "commits/{sha}/pulls"
+        # The credential is part of the method, not a separate field: the question the
+        # token chain was built to answer is "which credential can read pull requests
+        # here", and it is answered per-caller, at run time, only by a live 200.
+        return numbers, "commits/{sha}/pulls" + (f" as {winner}" if winner else "")
     print(
         f"Notice: pull-request lookup unavailable ({api_failure}) — "
         "falling back to commit subjects.",
         file=sys.stderr,
     )
-    return _pull_requests_from_subjects(repo, commits, tokens), "commit subjects"
+    # api_failure already names every credential tried and how each was refused.
+    return (
+        _pull_requests_from_subjects(repo, commits, tokens),
+        f"commit subjects (pulls API refused — {api_failure})",
+    )
 
 
 def fetch_pr_comments(repo: str, pr_number: int, tokens) -> tuple[list[dict], str | None]:
     """Every issue comment on a PR, paginated. Returns (comments, failure_reason)."""
     comments: list[dict] = []
     for page in range(1, _MAX_COMMENT_PAGES + 1):
-        payload, reason = _get_json(
+        payload, reason, _ = _get_json(
             f"/repos/{repo}/issues/{pr_number}/comments",
             {"per_page": 100, "page": page}, tokens,
         )
@@ -1283,7 +1403,9 @@ def merge_candidates(pr_findings: list[dict], model_findings: list[dict]) -> lis
     return [merged[k] for k in order]
 
 
-def ingest_pr_review_findings(repo: str, before: str, after: str, tokens) -> tuple[list[dict], list[str]]:
+def ingest_pr_review_findings(
+    repo: str, before: str, after: str, tokens, receipt: dict | None = None,
+) -> tuple[list[dict], list[str]]:
     """Findings both PR-time reviewers already reported on the PRs in this push.
 
     Returns (findings, notes). Every note names something that was NOT ingested;
@@ -1295,6 +1417,8 @@ def ingest_pr_review_findings(repo: str, before: str, after: str, tokens) -> tup
         return [], ["no commits resolved for this push"]
 
     numbers, method = resolve_pull_requests(repo, commits, tokens)
+    if receipt is not None:
+        receipt["pr_method"] = method
     if not numbers:
         notes.append(
             f"no merged pull request resolved for this push (method: {method}) — "
@@ -1664,8 +1788,18 @@ def upsert_digest(
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-def _exit_with(criticals_new: int, criticals_tracked: int, model_error: Exception | None) -> None:
-    """The single place this module decides its exit code.
+def _exit_with(
+    criticals_new: int,
+    criticals_tracked: int,
+    model_error: Exception | None,
+    receipt: dict,
+) -> None:
+    """The single place this module decides its exit code — and emits its receipt.
+
+    The receipt is written here because this is the only function every terminal
+    path in main() goes through; wiring it to the success path alone would leave the
+    two early returns silent, and those are the "never ran" cases a reader needs to
+    tell apart from "ran, found nothing".
 
     Two independent reasons to go red, and both must be honoured even when the other
     is absent:
@@ -1673,10 +1807,13 @@ def _exit_with(criticals_new: int, criticals_tracked: int, model_error: Exceptio
     * A CRITICAL seen in this diff, whether newly filed or already tracked as an open
       issue — an unresolved CRITICAL demands attention on every merge until it is
       fixed or explicitly suppressed.
-    * The post-merge review pass not having run at all. A diff that was never reviewed
-      must never read as clean, and it can now reach this point because that failure
-      no longer aborts main() before the PR-time findings are filed.
+    * The post-merge review pass not having produced a usable review — it errored, it
+      returned an empty or truncated completion, or it answered in a shape the parser
+      could not read. A diff that was never reviewed must never read as clean, and it
+      can now reach this point because that failure no longer aborts main() before the
+      PR-time findings are filed.
     """
+    _step_summary(_receipt_markdown(receipt))
     criticals_total = criticals_new + criticals_tracked
     if criticals_total:
         print(
@@ -1716,9 +1853,14 @@ def main() -> None:
         print(f"ERROR: missing env vars: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
+    receipt = new_receipt()
+
     # All-zero before SHA = branch creation — no prior commit to diff against.
     if before and set(before) == {"0"}:
         print("Push has no prior commit (branch creation) — nothing to capture.")
+        receipt["post_merge"] = "skipped: branch creation (no prior commit)"
+        receipt["ingest"] = "skipped: nothing to diff"
+        _exit_with(0, 0, None, receipt)
         return
 
     try:
@@ -1729,6 +1871,9 @@ def main() -> None:
 
     if not diff.strip():
         print("Empty diff — nothing to capture.")
+        receipt["post_merge"] = "skipped: empty diff"
+        receipt["ingest"] = "skipped: nothing to diff"
+        _exit_with(0, 0, None, receipt)
         return
     print(f"Reviewing merged diff ({len(diff):,} chars) …")
 
@@ -1748,13 +1893,19 @@ def main() -> None:
     if os.environ.get("INGEST_PR_REVIEWS", "true").strip().lower() not in ("false", "0", "no"):
         tokens = [("job GITHUB_TOKEN", token), ("app token", board_token)]
         try:
-            pr_findings, ingest_notes = ingest_pr_review_findings(repo, before, after, tokens)
+            pr_findings, ingest_notes = ingest_pr_review_findings(
+                repo, before, after, tokens, receipt
+            )
             print(f"  Ingested {len(pr_findings)} finding(s) from PR-time review comments")
+            receipt["ingest"] = "ran" + (" (with notes)" if ingest_notes else "")
+            receipt["ingested"] = len(pr_findings)
         except Exception as exc:  # noqa: BLE001 — an ingest bug must never sink capture
             ingest_notes = [f"PR-time ingest failed unexpectedly: {exc}"]
             print(f"WARNING: PR-time ingest failed: {exc}", file=sys.stderr)
+            receipt["ingest"] = f"failed: {exc}"
     else:
         print("  PR-time ingest disabled by INGEST_PR_REVIEWS")
+        receipt["ingest"] = "disabled by INGEST_PR_REVIEWS"
 
     for note in ingest_notes:
         print(f"WARNING: PR-time ingest — {note}", file=sys.stderr)
@@ -1778,17 +1929,31 @@ def main() -> None:
     model_error: Exception | None = None
     try:
         raw = review_diff(api_key, diff, context, build_suppression_context(suppressions))
-        findings = parse_findings(raw)
+        findings, dropped = parse_findings(raw)
         print(f"  Parsed {len(findings)} finding(s) from the post-merge review pass")
+        if dropped:
+            print(
+                f"WARNING: {dropped} post-merge finding(s) dropped for an unusable "
+                "severity — the model answered off-schema.",
+                file=sys.stderr,
+            )
+        receipt["post_merge"] = "ran, output parsed"
+        receipt["parsed"] = len(findings)
+        receipt["dropped_severity"] = dropped
     except Exception as exc:  # noqa: BLE001 — carried to the exit below, never swallowed
         model_error = exc
+        unreadable = isinstance(exc, ReviewParseError)
+        receipt["post_merge"] = (
+            "ran, output could not be parsed — failed closed" if unreadable
+            else f"did not run: {exc}"
+        )
         print(
-            f"ERROR: post-merge review pass did not run: {exc} — "
+            f"ERROR: post-merge review pass did not produce a usable review: {exc} — "
             "filing PR-time findings only; this run will still fail.",
             file=sys.stderr,
         )
         _step_summary(
-            f"### ❌ Post-merge review pass did not run\n\n`{exc}`\n\n"
+            f"### ❌ Post-merge review pass did not produce a usable review\n\n`{exc}`\n\n"
             "The merged diff was NOT re-reviewed. Any PR-time reviewer findings were "
             "still filed.\n"
         )
@@ -1804,6 +1969,7 @@ def main() -> None:
         suppressed, sup_id = is_suppressed(f, suppressions)
         if suppressed:
             print(f"  Suppressed [{f['severity']}] {f['title'][:60]} (rule: {sup_id})")
+            receipt["suppressed"] += 1
             continue
         kept.append(f)
 
@@ -1811,7 +1977,7 @@ def main() -> None:
         print("No findings to capture after suppressions.")
         # Not a bare return: if the post-merge pass never ran, "nothing to file" is
         # not the same as "nothing to find", and the run must still go red.
-        _exit_with(0, 0, model_error)
+        _exit_with(0, 0, model_error, receipt)
         return
 
     ensure_labels(token, repo)
@@ -1898,7 +2064,9 @@ def main() -> None:
         f"{' (new digest issue)' if digest_issues else ''}. "
         f"CRITICALs: {criticals_new} new, {criticals_already_tracked} already tracked."
     )
-    _exit_with(criticals_new, criticals_already_tracked, model_error)
+    receipt["filed"] = created
+    receipt["digested"] = digest_rows
+    _exit_with(criticals_new, criticals_already_tracked, model_error, receipt)
 
 
 if __name__ == "__main__":
