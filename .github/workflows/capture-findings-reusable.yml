@@ -1,7 +1,11 @@
 name: Capture security findings (reusable)
 
-# Reusable post-merge findings capture. Files HIGH/MEDIUM/LOW findings as tracked
-# GitHub Issues — complementing the CRITICAL gate that runs at PR time.
+# Reusable post-merge findings capture. Files CRITICAL/HIGH/MEDIUM/LOW findings as
+# tracked GitHub Issues — complementing the CRITICAL gate that runs at PR time.
+#
+# "Complementing", not "duplicating": this runs AFTER the merge, so any CRITICAL it
+# files as a new issue is one the PR-time gate did not block. That is why CRITICALs
+# are board-added here too — see BOARD_ADD_SEVERITIES in capture.py.
 #
 # Findings come from TWO sources, merged into one deduplicated set:
 #
@@ -38,7 +42,7 @@ name: Capture security findings (reusable)
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         # Optional (infra-commons/meta#661) — omit entirely until this org has provisioned the
-#         # secret; a newly-filed HIGH just won't be board-added, nothing else changes:
+#         # secret; a newly-filed CRITICAL/HIGH just won't be board-added, nothing else changes:
 #         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
 #
 # The caller workflow must grant:
@@ -75,7 +79,8 @@ on:
       INFRA_COMMONS_BOT_PRIVATE_KEY:
         description: >-
           Optional. The infra-commons-bot App's private key, forwarded by the caller so a newly
-          filed HIGH finding can be added to the org's board Inbox (infra-commons/meta#661). Not
+          filed CRITICAL or HIGH finding can be added to the org's board Inbox
+          (infra-commons/meta#661). Not
           required — omitted or empty, board-add is skipped and everything else is unaffected.
         required: false
 

@@ -5,7 +5,13 @@ inputs given — it does not narrow additively. The `board-token` step used to r
 `organization-projects: write`, so the minted token had zero `issues` scope, and
 `addProjectV2ItemById`'s `contentId` (the issue this same job just created) could never resolve.
 That failed as `NOT_FOUND` on a node that plainly exists, one log line, job still exits 0 —
-indistinguishable from "no findings this run." No board-add has ever succeeded because of it.
+indistinguishable from "no findings this run," and no board-add succeeded for as long as it held.
+
+THAT CONDITION IS CLOSED, and this paragraph is history, not a live outage: the step below now
+requests `permission-issues: read` alongside `permission-organization-projects: write`, and board
+adds land. Re-verified 2026-09-02 while widening `BOARD_ADD_SEVERITIES` to include CRITICAL —
+"is the credential still broken?" decides whether such a change ships behaviour or a no-op, so it
+was checked rather than assumed. Left in place because the shape is what the tests below pin.
 
 This test exists so a future edit to this step can drop `permission-issues` again (e.g. while
 "cleaning up" the `with:` block) without anyone noticing until the same silent failure recurs.
