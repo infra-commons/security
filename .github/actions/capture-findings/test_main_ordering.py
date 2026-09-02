@@ -328,3 +328,83 @@ def test_the_receipt_names_the_credential_that_resolved_the_prs(monkeypatch, har
     capture.main()
 
     assert "as app token" in summary.read_text()
+
+
+# ── Board-add wiring: which findings reach it, and how often ────────────────────
+#
+# `test_board_intake.py` pins `BOARD_ADD_SEVERITIES` and tests `add_to_board` in isolation.
+# Neither shows that main() actually ROUTES a CRITICAL there, nor how many times. Both are
+# ordering properties of the filing loop, which is what this file is for.
+
+
+@pytest.fixture
+def board_calls(monkeypatch):
+    """Record every `add_to_board` call main() makes, with a token provisioned."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setenv("BOARD_APP_TOKEN", "app-token")
+    monkeypatch.setattr(
+        capture, "add_to_board",
+        lambda token, owner, node_id: (calls.append((owner, node_id)), (True, "added"))[1],
+    )
+    return calls
+
+
+def _critical(location="src/db.py:9", title="SQL injection"):
+    return {"severity": "CRITICAL", "location": location, "title": title,
+            "description": title, "category": "injection"}
+
+
+def test_a_new_critical_reaches_the_board(monkeypatch, harness, board_calls):
+    """The point of widening BOARD_ADD_SEVERITIES — a set literal nothing routes to is inert."""
+    created, _ = harness
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([_critical()], 0))
+
+    with pytest.raises(SystemExit) as exc:
+        capture.main()
+
+    assert exc.value.code == 1, "a new CRITICAL must still go red"
+    assert len(created) == 1
+    assert board_calls == [("o", "node1")]
+
+
+def test_an_already_tracked_critical_is_never_re_added(monkeypatch, harness, board_calls):
+    """The idempotency property, and the reason no 'is it already on the board?' query is needed.
+
+    A CRITICAL raised at PR time and re-encountered by a later post-merge run must not produce a
+    second card. It cannot: the `Already tracked` branch `continue`s before anything is filed, and
+    the board-add lives inside the just-created-issue branch below it. Ordering IS the guard here,
+    so it is the thing worth pinning — a refactor that hoisted the board-add out of that branch
+    would look harmless and would duplicate a card on every single run thereafter.
+    """
+    created, _ = harness
+    finding = _critical()
+    title = capture.issue_title(finding)
+    monkeypatch.setattr(capture, "open_security_issues", lambda t, r: {title: {"number": 1}})
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([finding], 0))
+
+    with pytest.raises(SystemExit) as exc:
+        capture.main()
+
+    assert exc.value.code == 1, "a known-open CRITICAL still goes red"
+    assert created == [], "nothing was filed, so there is nothing to board"
+    assert board_calls == []
+
+
+def test_two_findings_at_one_location_board_a_single_card(monkeypatch, harness, board_calls):
+    """The same-run half of the same property: the dedupe sets are fed as the loop goes."""
+    created, _ = harness
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: (
+        [_critical(), _critical(title="SQL injection (again)")], 0
+    ))
+
+    with pytest.raises(SystemExit):
+        capture.main()
+
+    assert len(created) == 1
+    assert len(board_calls) == 1

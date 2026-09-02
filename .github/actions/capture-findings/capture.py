@@ -41,9 +41,9 @@ Optional env vars:
                               gets an individual issue; below it, findings roll
                               into the rolling MEDIUM/LOW digest instead.
                               Empty/unset defaults to HIGH (historical behaviour).
-  BOARD_APP_TOKEN             App installation token. Adds a filed HIGH to the org
-                              board, and is the fallback credential for reading
-                              PR-time review comments (see the ingest section).
+  BOARD_APP_TOKEN             App installation token. Adds a filed CRITICAL or HIGH
+                              to the org board, and is the fallback credential for
+                              reading PR-time review comments (see the ingest section).
   INGEST_PR_REVIEWS           "false" disables the PR-time review ingest below.
                               Anything else (or unset) leaves it on.
 
@@ -1486,8 +1486,9 @@ def ingest_pr_review_findings(
 
 # ── Board intake (Projects v2) ──────────────────────────────────────────────────
 #
-# A newly-filed HIGH finding lands on the repo's issue list only — never on the org's GitHub
-# Project board — so it's invisible to the console's Inbox→Doing drain (infra-commons/meta#661).
+# A newly-filed CRITICAL or HIGH finding lands on the repo's issue list only — never on the org's
+# GitHub Project board — so it's invisible to the console's Inbox→Doing drain
+# (infra-commons/meta#661).
 # `github.token` (this whole module's REST credential above) cannot fix that: org-level Projects
 # v2 mutations need an App installation token carrying `organization_projects`, which no
 # `permissions:` block can grant to the default Actions token. The caller (reusable workflow)
@@ -1499,11 +1500,27 @@ def ingest_pr_review_findings(
 # of a successful capture, never a precondition for one. Absent/wrong-shaped input, a missing
 # field, a GraphQL error — all are just a reason string a caller logs and moves on from.
 
-# Only HIGH gets a board-add attempt. CRITICAL already blocks the merge via the PR-time gate (a
-# board card adds little on top of that); MEDIUM/LOW roll into the rolling digest, not individual
-# issues, so there's no single issue to add. This is a scoping call the operator can override —
-# see infra-commons/meta#661.
-BOARD_ADD_SEVERITIES = {"HIGH"}
+# CRITICAL and HIGH both get a board-add attempt; MEDIUM/LOW roll into the rolling digest, not
+# individual issues, so there's no single issue to add.
+#
+# This set was HIGH-only until now, on the reasoning that "CRITICAL already blocks the merge via
+# the PR-time gate, so a board card adds little on top of that". infra-commons/meta#661 reserved
+# that scoping call to the operator, and the operator has now overridden it, because the premise
+# is false in two independent ways:
+#
+#   * WRONG TENSE. This module runs POST-merge, on push to main. Every CRITICAL it files as a NEW
+#     issue is by construction one the PR-time gate did not block — the gate never saw that diff,
+#     or the PR-time reviewers didn't raise it and the post-merge pass did, or it was raised and
+#     then released with `severity:accepted-for-release`. The merge is already done by the time
+#     this line is reached, so there is no block left for a card to be redundant with.
+#   * WRONG LIFETIME. Even for a CRITICAL the gate genuinely did block, the block ends with that
+#     PR. The ISSUE outlives it: once the PR is closed or abandoned the finding stays open,
+#     off-board, and invisible to every dispatch surface. The card is not redundant with the
+#     gate; it is the only durable record once the gate stops applying.
+#
+# sharedinfra's board-coverage.py already treats critical+high as board-worthy
+# (`BOT_SECURITY_FINDING_SEVERITIES`); this set was the fleet's one dissenting copy of that fact.
+BOARD_ADD_SEVERITIES = {"CRITICAL", "HIGH"}
 
 # Mirrors sharedinfra's scripts/projects_topology.py (the control-plane's own copy of the same
 # fact) — kept in sync by hand. Five entries, changes rarely; not worth a cross-repo fetch for.
