@@ -182,15 +182,60 @@ def test_unmerged_pull_requests_are_dropped(monkeypatch):
         _fake_client([_Resp(200, [{"number": 4, "merged_at": None},
                                   {"number": 5, "merged_at": "2026-09-01T00:00:00Z"}])]),
     )
-    numbers, method = capture.resolve_pull_requests("o/r", [_AFTER], [("job", "t")])
+    numbers, method, blocked = capture.resolve_pull_requests(
+        "o/r", [_AFTER], [("job", "t")]
+    )
     assert numbers == [5]
+    assert blocked is None
     # Credential-bearing: the method names which token actually got the 200.
     assert method.startswith("commits/{sha}/pulls")
     assert "as job" in method
 
 
-def test_forbidden_api_falls_back_to_commit_subjects(monkeypatch, capsys):
-    """The path every caller takes on day one, before any pin bump reaches them."""
+# infra-commons/meta#1291's real merge subject (5a8c7e5d), verbatim: a paraphrase would
+# quietly stop exercising the `(#N)` squash trailer that run 33673760827 actually parsed.
+_MERGE_1291 = (
+    "legal-pin-drift: schedule the detector that nothing ever ran "
+    "(infra-commons/meta#1258) (#1291)\n"
+)
+
+
+def test_forbidden_pulls_api_also_forbids_the_subject_fallback(monkeypatch, capsys):
+    """The shape production actually produces — and why it read as "no PR".
+
+    Reconstructs infra-commons/meta run 33673760827 (2026-09-02): the credential refused
+    `/commits/{sha}/pulls` is refused `/issues/{N}` too, so the fallback cannot succeed in
+    the situation that invokes it. The subject parses fine; that was never the problem.
+    Replaces a test that queued 403-then-200 — a combination production cannot produce,
+    which is why nothing ever flagged the path as dead.
+    """
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: _Result(stdout=_MERGE_1291))
+    monkeypatch.setattr(
+        capture.httpx, "Client",
+        _fake_client([
+            _Resp(403), _Resp(403),   # commits/{sha}/pulls — both credentials
+            _Resp(403), _Resp(403),   # issues/1291 verification — both, same refusal
+        ]),
+    )
+    numbers, method, blocked = capture.resolve_pull_requests(
+        "o/r", [_AFTER], [("job GITHUB_TOKEN", "t"), ("app token", "a")],
+    )
+    assert numbers == []
+    assert method.startswith("commit subjects")
+    # Not "no PR" — "could not look". Both refusals named, and both credentials.
+    assert blocked is not None
+    assert "commits/" in blocked and "/issues/1291" in blocked
+    assert "job GITHUB_TOKEN: HTTP 403" in blocked and "app token: HTTP 403" in blocked
+    assert "falling back to commit subjects" in capsys.readouterr().err
+
+
+def test_the_subject_fallback_is_retained_for_a_caller_where_it_can_verify(monkeypatch):
+    """Pins the retained path — honestly labelled as unobserved.
+
+    This 403-then-200 combination has never been seen in production; the test above is the
+    evidence for why. Kept rather than short-circuited because deleting it would rest on an
+    inference from one run, on infra that reaches every org the moment the tag advances.
+    """
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, **kw: _Result(stdout="Merge pull request #42 from o/feature\n"),
@@ -202,27 +247,72 @@ def test_forbidden_api_falls_back_to_commit_subjects(monkeypatch, capsys):
             _Resp(200, {"pull_request": {"merged_at": "2026-09-01"}}),   # issues/42 verification
         ]),
     )
-    numbers, method = capture.resolve_pull_requests("o/r", [_AFTER], [("job GITHUB_TOKEN", "t")])
+    numbers, method, blocked = capture.resolve_pull_requests(
+        "o/r", [_AFTER], [("job GITHUB_TOKEN", "t")],
+    )
     assert numbers == [42]
     assert method.startswith("commit subjects")
     # The fallback method carries why the API path was refused, so a receipt showing
     # "commit subjects" says which credential was denied and how.
     assert "job GITHUB_TOKEN: HTTP 403" in method
-    assert "falling back to commit subjects" in capsys.readouterr().err
+    # It resolved a PR, so nothing is blocked. A working run must not raise an alarm.
+    assert blocked is None
 
 
 def test_fallback_drops_a_number_that_is_an_issue(monkeypatch):
-    """The API verification is what makes the subject heuristic safe to use at all."""
+    """The API verification is what makes the subject heuristic safe to use at all.
+
+    Direct on `_pull_requests_from_subjects`: routing through a 403 on the primary just to
+    reach it imported the impossible premise the test above retired.
+    """
     monkeypatch.setattr(
         subprocess, "run",
         lambda cmd, **kw: _Result(stdout="fix: something (#311)\n"),
     )
     monkeypatch.setattr(
         capture.httpx, "Client",
-        _fake_client([_Resp(403), _Resp(200, {"title": "an ordinary issue"})]),
+        _fake_client([_Resp(200, {"title": "an ordinary issue"})]),
     )
-    numbers, _ = capture.resolve_pull_requests("o/r", [_AFTER], [("job", "t")])
+    numbers, verify_failure = capture._pull_requests_from_subjects(
+        "o/r", [_AFTER], [("job", "t")],
+    )
     assert numbers == []
+    # Dropped because it is an issue, not because anything was refused.
+    assert verify_failure is None
+
+
+def test_the_subject_fallback_reports_its_own_refusal(monkeypatch):
+    """Nothing is discarded at an underscore — that discard is the whole defect.
+
+    It threw the reason away, so a refused verification and a subject naming no PR
+    produced the identical empty list.
+    """
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda cmd, **kw: _Result(stdout="fix: something (#42)\n"),
+    )
+    monkeypatch.setattr(capture.httpx, "Client", _fake_client([_Resp(403)]))
+    numbers, verify_failure = capture._pull_requests_from_subjects(
+        "o/r", [_AFTER], [("job", "t")],
+    )
+    assert numbers == []
+    assert verify_failure is not None
+    assert "/issues/42" in verify_failure and "HTTP 403" in verify_failure
+
+
+def test_a_push_with_no_pull_request_is_not_reported_as_blocked(monkeypatch):
+    """A direct push to main is a quiet non-event, not a permissions alarm.
+
+    The regression guard: loud is worthless if it also fires on every push that
+    legitimately has no pull request behind it.
+    """
+    monkeypatch.setattr(capture.httpx, "Client", _fake_client([_Resp(200, [])]))
+    numbers, method, blocked = capture.resolve_pull_requests(
+        "o/r", [_AFTER], [("job", "t")],
+    )
+    assert numbers == []
+    assert method.startswith("commits/{sha}/pulls")
+    assert blocked is None
 
 
 # ── Comment authorship ──────────────────────────────────────────────────────────
@@ -237,7 +327,7 @@ def test_only_the_actions_bots_comments_are_ingested(monkeypatch):
         "### Summary\nnope\n"
     )
     monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
-    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test"))
+    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test", None))
     monkeypatch.setattr(
         capture, "fetch_pr_comments",
         lambda *a: ([{"user": {"login": "a-contributor"}, "body": forged}], None),
@@ -263,10 +353,61 @@ def test_step_summary_is_a_no_op_outside_actions(monkeypatch):
 
 def test_unresolvable_pr_is_reported_not_silently_empty(monkeypatch):
     monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
-    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([], "commit subjects"))
+    monkeypatch.setattr(
+        capture, "resolve_pull_requests", lambda *a: ([], "commit subjects", None)
+    )
     findings, notes = capture.ingest_pr_review_findings("o/r", _BEFORE, _AFTER, [("job", "t")])
     assert findings == []
     assert any("NOT ingested" in n for n in notes)
+    # The quiet case: nothing was refused, so nothing claims a permissions defect.
+    assert not any("#148" in n for n in notes)
+
+
+def test_a_blocked_lookup_names_the_permission_and_the_remedy(monkeypatch):
+    """A note that says only what did not happen leaves the reader with no next step."""
+    monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
+    monkeypatch.setattr(
+        capture, "resolve_pull_requests",
+        lambda *a: ([], "commit subjects (…)",
+                    "GET /repos/o/r/commits/x/pulls: job GITHUB_TOKEN: HTTP 403; "
+                    "app token: HTTP 403"),
+    )
+    receipt = capture.new_receipt()
+    findings, notes = capture.ingest_pr_review_findings(
+        "o/r", _BEFORE, _AFTER, [("job", "t")], receipt,
+    )
+    assert findings == []
+    joined = " ".join(notes)
+    # Not "no PR" — "could not read", plus the pin that fixes it.
+    assert "could be READ" in joined and "NOT ingested" in joined
+    assert "pull-requests" in joined and "#148" in joined
+    assert "blocked" in receipt["pr_access"]
+
+
+def test_a_non_permission_refusal_does_not_claim_a_missing_permission(monkeypatch):
+    """The do-not-overclaim guard: a 5xx left this push unresolved too and is worth
+    reporting, but naming a missing `pull-requests` permission would assert something the
+    run never measured.
+    """
+    monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
+    monkeypatch.setattr(
+        capture, "resolve_pull_requests",
+        lambda *a: ([], "commit subjects (…)",
+                    "GET /repos/o/r/commits/x/pulls: job GITHUB_TOKEN: HTTP 500"),
+    )
+    findings, notes = capture.ingest_pr_review_findings("o/r", _BEFORE, _AFTER, [("job", "t")])
+    joined = " ".join(notes)
+    assert "HTTP 500" in joined and "NOT ingested" in joined
+    assert "#148" not in joined and "pull-requests" not in joined
+
+
+def test_receipt_rows_all_exist_in_a_new_receipt():
+    """`_receipt_markdown` indexes `receipt[key]` strictly, and deliberately so.
+
+    An unpaired `_RECEIPT_ROWS` entry raises KeyError inside `_exit_with`, after the
+    findings are filed. `.get()` would hide that wiring bug; this makes strictness safe.
+    """
+    assert {k for k, _ in capture._RECEIPT_ROWS} <= set(capture.new_receipt())
 
 
 def test_findings_are_capped_and_the_cap_is_reported(monkeypatch):
@@ -278,7 +419,7 @@ def test_findings_are_capped_and_the_cap_is_reported(monkeypatch):
         + "\n### Summary\nlots\n"
     )
     monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
-    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test"))
+    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test", None))
     monkeypatch.setattr(
         capture, "fetch_pr_comments",
         lambda *a: ([{"user": {"login": "github-actions[bot]"}, "body": body}], None),
@@ -299,7 +440,7 @@ def test_higher_severities_survive_the_cap(monkeypatch):
         "### Summary\nlots\n"
     )
     monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
-    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test"))
+    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([9], "test", None))
     monkeypatch.setattr(
         capture, "fetch_pr_comments",
         lambda *a: ([{"user": {"login": "github-actions[bot]"}, "body": body}], None),
@@ -315,7 +456,7 @@ def test_sources_name_the_reviewer_and_the_pr(monkeypatch):
         "### HIGH — serious\n- [src/app.py:4] Something real.\n\n### Summary\nok\n"
     )
     monkeypatch.setattr(capture, "range_commits", lambda b, a: [_AFTER])
-    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([228], "test"))
+    monkeypatch.setattr(capture, "resolve_pull_requests", lambda *a: ([228], "test", None))
     monkeypatch.setattr(
         capture, "fetch_pr_comments",
         lambda *a: ([{"user": {"login": "github-actions[bot]"}, "body": body}], None),

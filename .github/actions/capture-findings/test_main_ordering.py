@@ -330,6 +330,55 @@ def test_the_receipt_names_the_credential_that_resolved_the_prs(monkeypatch, har
     assert "as app token" in summary.read_text()
 
 
+def test_the_receipt_shows_a_blocked_pr_read(monkeypatch, harness):
+    """A cell distinct from "PR resolution": which credential won vs whether one could.
+
+    Before this row, a run whose ingest was refused outright and a run whose push simply
+    had no pull request produced the same receipt.
+    """
+    _, summary = harness
+
+    def _ingest(repo, before, after, tokens, receipt=None):
+        receipt["pr_access"] = "blocked — no credential could read pull requests"
+        return [], ["no pull request could be READ for this push"]
+
+    monkeypatch.setattr(capture, "ingest_pr_review_findings", _ingest)
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(capture, "parse_findings", lambda raw: ([], 0))
+
+    capture.main()
+
+    text = summary.read_text()
+    assert "| PR read access |" in text
+    assert "blocked" in text
+
+
+def test_a_blocked_ingest_does_not_change_the_exit_code(monkeypatch, harness):
+    """The hard constraint: an ingest fault never sinks a run and never alters gating.
+
+    Making the refusal loud is only safe if loud stays confined to the summary and
+    stderr. A blocked ingest must still exit 0 and must still file everything the
+    post-merge pass found — a HIGH here, filed as normal.
+    """
+    created, _ = harness
+    monkeypatch.setattr(
+        capture, "ingest_pr_review_findings",
+        lambda *a, **kw: ([], ["no pull request could be READ for this push. Remedy: …"]),
+    )
+    monkeypatch.setattr(capture, "review_diff", lambda *a: "{}")
+    monkeypatch.setattr(
+        capture, "parse_findings",
+        lambda raw: ([{"severity": "HIGH", "location": "src/app.py:12",
+                       "title": "Token exposed", "description": "d",
+                       "category": "secrets"}], 0),
+    )
+
+    capture.main()  # must not raise SystemExit
+
+    assert len(created) == 1
+    assert "[HIGH]" in created[0]["title"]
+
+
 # ── Board-add wiring: which findings reach it, and how often ────────────────────
 #
 # `test_board_intake.py` pins `BOARD_ADD_SEVERITIES` and tests `add_to_board` in isolation.
