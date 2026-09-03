@@ -1,7 +1,8 @@
 """Tests for the board-add path added in infra-commons/meta#661.
 
-`add_to_board` is the single function that decides whether a newly-filed HIGH finding reaches the
-org's GitHub Project Inbox. Every scenario here asserts the same shape: on any failure, it returns
+`add_to_board` is the single function that decides whether a newly-filed CRITICAL or HIGH finding
+reaches the org's GitHub Project Inbox. Every scenario here asserts the same shape: on any
+failure, it returns
 `(False, <reason>)` — never raises, never touches anything the rest of `capture.py` depends on for
 its exit code. That's the property the whole feature leans on: it must be safe to ship into every
 org today, before a single one of them has provisioned the App-token secret.
@@ -190,8 +191,12 @@ def test_create_issue_returns_the_response_json(monkeypatch):
     assert result == {"number": 42, "node_id": "I_xyz"}
 
 
-def test_board_add_severities_is_high_only():
-    # A deliberate, named scope decision (infra-commons/meta#661) — CRITICAL already blocks the
-    # PR-time gate and MEDIUM/LOW never get an individual issue to add. Pin it with a test so a
-    # future change to this set is a decision, not an accident.
-    assert capture.BOARD_ADD_SEVERITIES == {"HIGH"}
+def test_board_add_severities_is_critical_and_high():
+    # Still a deliberate, named scope decision — pinned so a future change to this set stays a
+    # decision rather than an accident. What changed: infra-commons/meta#661 originally scoped
+    # this to HIGH only, on the reasoning that a CRITICAL is already blocked by the PR-time gate.
+    # The operator overrode that. This module runs POST-merge, so a CRITICAL it files as a NEW
+    # issue was never blocked by anything; and even one that WAS blocked outlives its PR, staying
+    # open and off-board once the gate stops applying. MEDIUM/LOW still roll into the digest, so
+    # there is genuinely no individual issue to add for them — that half of #661 stands.
+    assert capture.BOARD_ADD_SEVERITIES == {"CRITICAL", "HIGH"}
