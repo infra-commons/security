@@ -58,13 +58,17 @@ def test_board_token_also_requests_pull_requests_read():
     `issues: write` only. Widening the job's own `permissions:` block would not help —
     it would hard-fail every caller that had not first edited its own workflow.
 
-    Dropping this key does not break anything loudly. capture.py falls back to
-    resolving pull requests from commit subjects, which misses every squash merge whose
-    subject carries no trailing `(#N)` — so the ingest quietly gets thinner rather than
-    stopping, which is the failure shape #1187 exists to remove.
+    Dropping this key does not thin the ingest — it STOPS it. That was the belief here
+    until infra-commons/meta run 33673760827 (2026-09-02) measured it: capture.py's
+    commit-subject fallback verifies each candidate against `/issues/{N}`, which for a
+    number that is a pull request needs the same access as the `/commits/{sha}/pulls`
+    lookup whose refusal invoked the fallback. So both doors are shut by the same missing
+    key, and the run reported "no merged pull request resolved" — indistinguishable from
+    a push that genuinely had no PR. Precisely the failure shape #1187 exists to remove.
     """
     with_block = _board_token_step()["with"]
     assert with_block.get("permission-pull-requests") == "read", (
         "without this, capture.py cannot read the PR-time reviewers' comments through the "
-        "App token and silently degrades to commit-subject PR resolution"
+        "App token, and the commit-subject fallback is refused by the same missing "
+        "permission — the ingest stops rather than degrading"
     )
