@@ -946,6 +946,20 @@ _MAX_PRS_PER_RUN = 10          # distinct PRs whose comments we read
 _MAX_COMMENT_PAGES = 5         # 100 comments per page
 _MAX_PR_FINDINGS_PER_RUN = 25  # hard cap; see the truncation note in ingest_pr_review_findings
 
+# The one remedy for a blocked ingest, named ONCE — same argument as `_ANTHROPIC_MODEL`
+# above: quoted from two note-building sites, and a missed edit site sends a reader at
+# the wrong file. It states what a blocked run MEASURED (every credential refused), not
+# a permission rule this module is entitled to assert.
+_PR_ACCESS_REMEDY = (
+    "the caller's pin of capture-findings-reusable.yml predates infra-commons/security#148 "
+    "(b4d7507), so the App token it mints carries no `pull-requests: read` and neither "
+    "credential can read this repo's pull requests. Bump that pin to #148 or later. The "
+    "job's own `github.token` cannot substitute — a called workflow's token is capped by "
+    "the CALLER's `permissions:` block, and widening the reusable's job block instead "
+    "would hard-fail every caller that had not first edited its own workflow "
+    "(infra-commons/security#90). Context: infra-commons/meta#1187."
+)
+
 _FINDINGS_ANCHOR_RE = re.compile(r'(?mi)^##\s+Security findings\s*$')
 _SECTION_RE = re.compile(r'(?mi)^###\s+(CRITICAL|HIGH|MEDIUM|LOW)\b[^\n]*$')
 _ANY_SECTION_RE = re.compile(r'(?m)^###\s')
@@ -998,6 +1012,9 @@ def new_receipt() -> dict:
         "dropped_severity": 0,
         "ingest": "not started",
         "pr_method": "—",
+        # Bounded constants ONLY here, never a reason string: `_receipt_markdown` renders
+        # an unescaped pipe table. Detail goes to the notes, which main() renders first.
+        "pr_access": "—",
         "ingested": 0,
         "suppressed": 0,
         "filed": 0,
@@ -1011,6 +1028,7 @@ _RECEIPT_ROWS = (
     ("dropped_severity", "Dropped (unusable severity)"),
     ("ingest", "PR-time ingest"),
     ("pr_method", "PR resolution"),
+    ("pr_access", "PR read access"),
     ("ingested", "Findings ingested"),
     ("suppressed", "Suppressed"),
     ("filed", "Issues filed"),
@@ -1058,6 +1076,17 @@ def _get_json(path: str, params: dict, tokens: list[tuple[str, str]]):
     if not attempts:
         return None, f"GET {path}: no credential available", None
     return None, f"GET {path}: " + "; ".join(attempts), None
+
+
+def _is_permission_refusal(reason: str | None) -> bool:
+    """True when a `_get_json` failure reason names a credential refusal (401/403).
+
+    Reads a string THIS MODULE formats, in `_get_json` above — the coupling is internal.
+    It exists so `_PR_ACCESS_REMEDY` is claimed only where it applies: a 404-only chain,
+    a 5xx or a transport error is still reported, but calling it a missing
+    `pull-requests` permission would assert something the run never measured.
+    """
+    return bool(reason) and ("HTTP 401" in reason or "HTTP 403" in reason)
 
 
 def range_commits(before: str, after: str) -> list[str]:
@@ -1135,31 +1164,62 @@ def _commit_subjects(commits: list[str]) -> list[str]:
     return subjects
 
 
-def _pull_requests_from_subjects(repo: str, commits: list[str], tokens) -> list[int]:
+def _pull_requests_from_subjects(
+    repo: str, commits: list[str], tokens,
+) -> tuple[list[int], str | None]:
     """Fallback PR resolution via commit subjects, each candidate API-verified.
 
-    A candidate is kept only if /issues/{N} comes back carrying a `pull_request`
-    object with a non-null `merged_at` — so an issue number that slipped through the
-    subject patterns is dropped rather than filed against.
+    Returns (numbers, verify_failure). A candidate is kept only if /issues/{N} comes back
+    carrying a `pull_request` object with a non-null `merged_at` — so an issue number that
+    slipped through the subject patterns is dropped rather than filed against.
+
+    **This verification needs the same access as the lookup whose refusal sent us here.**
+    `/issues/{N}`, for a number that is a PULL REQUEST, is refused by the same credential
+    that was just refused `/commits/{sha}/pulls` — so on the caller where this fallback is
+    reached, it is usually refused too. Measured: infra-commons/meta run 33673760827
+    (2026-09-02, merge 5a8c7e5d). Its subject parsed to candidate 1291 correctly, both
+    credentials answered 403, nothing was ingested — and the run reported only "no merged
+    pull request resolved for this push", which reads as "this push had no PR".
+
+    So the reason is RETURNED, not dropped at an underscore. The path is kept rather than
+    short-circuited: it costs at most `_MAX_PRS_PER_RUN` extra GETs on an already-degraded
+    run, still works for any caller whose credentials verify, and makes every blocked run
+    measure the refusal for itself rather than leaving it inferred.
     """
     numbers: list[int] = []
     seen: set[int] = set()
+    # FIRST refusal only. Up to `_MAX_PRS_PER_RUN` candidates could each contribute one,
+    # and concatenating them would blow out both the note and the job-summary bullet.
+    verify_failure: str | None = None
     for subject in _commit_subjects(commits):
         for candidate in _pr_numbers_in_subject(subject):
             if candidate in seen or len(seen) >= _MAX_PRS_PER_RUN:
                 continue
             seen.add(candidate)
-            payload, _, _ = _get_json(f"/repos/{repo}/issues/{candidate}", {}, tokens)
+            payload, reason, _ = _get_json(f"/repos/{repo}/issues/{candidate}", {}, tokens)
+            if payload is None:
+                verify_failure = verify_failure or reason
+                continue
             if not isinstance(payload, dict):
                 continue
             pr = payload.get("pull_request")
             if isinstance(pr, dict) and pr.get("merged_at"):
                 numbers.append(candidate)
-    return numbers
+    return numbers, verify_failure
 
 
-def resolve_pull_requests(repo: str, commits: list[str], tokens) -> tuple[list[int], str]:
-    """Merged PR numbers covering `commits`, plus the method that resolved them."""
+def resolve_pull_requests(
+    repo: str, commits: list[str], tokens,
+) -> tuple[list[int], str, str | None]:
+    """Merged PR numbers covering `commits`, the method that resolved them, and why not.
+
+    `blocked` is the credential refusal that left this push with no READABLE pull request,
+    or None when nothing was refused. An empty `numbers` previously meant two things and
+    only one is a defect: no PR is associated with this push (a direct push to the default
+    branch — legitimate, nothing to report), versus every credential refused, so whether
+    there was a PR is UNKNOWN and the reviewers' findings went uningested. The second is
+    what silently disabled the ingest fleet-wide (see `_pull_requests_from_subjects`).
+    """
     numbers: list[int] = []
     seen: set[int] = set()
     api_failure = None
@@ -1188,17 +1248,30 @@ def resolve_pull_requests(repo: str, commits: list[str], tokens) -> tuple[list[i
         # The credential is part of the method, not a separate field: the question the
         # token chain was built to answer is "which credential can read pull requests
         # here", and it is answered per-caller, at run time, only by a live 200.
-        return numbers, "commits/{sha}/pulls" + (f" as {winner}" if winner else "")
+        #
+        # An empty `numbers` on THIS branch is the quiet outcome — the API answered, and
+        # its answer was "no pull request". Never reported as blocked.
+        return numbers, "commits/{sha}/pulls" + (f" as {winner}" if winner else ""), None
     print(
         f"Notice: pull-request lookup unavailable ({api_failure}) — "
         "falling back to commit subjects.",
         file=sys.stderr,
     )
     # api_failure already names every credential tried and how each was refused.
-    return (
-        _pull_requests_from_subjects(repo, commits, tokens),
-        f"commit subjects (pulls API refused — {api_failure})",
-    )
+    fallback, verify_failure = _pull_requests_from_subjects(repo, commits, tokens)
+    method = f"commit subjects (pulls API refused — {api_failure})"
+    if fallback:
+        # Degraded but working: the primary refusal already rides in `method` into the
+        # receipt's "PR resolution" row. No note — a run that ingested fine must not be
+        # made to look broken.
+        return fallback, method, None
+    blocked = api_failure
+    if verify_failure:
+        blocked += (
+            "; the commit-subject fallback's own /issues verification was refused too "
+            f"({verify_failure})"
+        )
+    return [], method, blocked
 
 
 def fetch_pr_comments(repo: str, pr_number: int, tokens) -> tuple[list[dict], str | None]:
@@ -1416,22 +1489,44 @@ def ingest_pr_review_findings(
     if not commits:
         return [], ["no commits resolved for this push"]
 
-    numbers, method = resolve_pull_requests(repo, commits, tokens)
+    numbers, method, blocked = resolve_pull_requests(repo, commits, tokens)
     if receipt is not None:
         receipt["pr_method"] = method
     if not numbers:
-        notes.append(
-            f"no merged pull request resolved for this push (method: {method}) — "
-            "PR-time reviewer findings were NOT ingested"
-        )
+        if blocked:
+            # NOT the same statement as "this push had no PR". Whether it had one is
+            # unknown — the credential could not look. Say that, and say what fixes it.
+            note = (
+                "no pull request could be READ for this push — every credential was "
+                f"refused ({blocked}); PR-time reviewer findings were NOT ingested"
+            )
+            if _is_permission_refusal(blocked):
+                note += f". Remedy: {_PR_ACCESS_REMEDY}"
+            notes.append(note)
+            if receipt is not None:
+                receipt["pr_access"] = "blocked — no credential could read pull requests"
+        else:
+            notes.append(
+                f"no merged pull request resolved for this push (method: {method}) — "
+                "PR-time reviewer findings were NOT ingested"
+            )
         return [], notes
+    if receipt is not None:
+        receipt["pr_access"] = "ok"
     print(f"  PR-time ingest: resolved PR(s) {numbers} via {method}")
 
     findings: list[dict] = []
     for number in numbers:
         comments, reason = fetch_pr_comments(repo, number, tokens)
         if reason:
-            notes.append(f"could not read comments on #{number} ({reason})")
+            # The sub-case where PR numbers resolved but the comments themselves are
+            # refused — same missing permission, one endpoint later, so same remedy.
+            note = f"could not read comments on #{number} ({reason})"
+            if _is_permission_refusal(reason):
+                note += f". Remedy: {_PR_ACCESS_REMEDY}"
+                if receipt is not None:
+                    receipt["pr_access"] = "blocked — no credential could read PR comments"
+            notes.append(note)
             continue
         saw_marker = False
         for comment in comments:
@@ -1928,7 +2023,7 @@ def main() -> None:
         print(f"WARNING: PR-time ingest — {note}", file=sys.stderr)
     if ingest_notes:
         _step_summary(
-            "### ⚠️ PR-time reviewer findings partially ingested\n\n"
+            "### ⚠️ PR-time reviewer findings not fully ingested\n\n"
             + "\n".join(f"- {n}" for n in ingest_notes)
             + "\n\nFindings raised only by a PR-time reviewer may be missing from this run.\n"
         )

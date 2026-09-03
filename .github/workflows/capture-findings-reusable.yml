@@ -30,12 +30,26 @@ name: Capture security findings (reusable)
 #     push:
 #       branches: [main]
 #
-#   concurrency:
-#     group: capture-findings
-#     cancel-in-progress: false
+#   # NO `concurrency:` block. This pattern carried one until 2026-09-03 and every caller
+#   # copied it; it silently discarded whole merges. `cancel-in-progress: false` does NOT
+#   # mean "queue everything" — GitHub permits exactly one PENDING run per group and
+#   # CANCELS the previously pending one when a newer run arrives. Capture is `on: push`,
+#   # so a burst of merges cancels the runs in the middle of the burst.
+#   #
+#   # A cancelled run has ZERO jobs: no receipt, no issue, no red — the "never ran" state
+#   # the capture receipt exists to expose, arriving by the one route the receipt cannot
+#   # reach. And the loss is permanent, because run N would have reviewed
+#   # before_N..after_N while run N+1 reviews after_N..after_{N+1}: the skipped diff is
+#   # never re-examined, by either source. Measured in infra-commons/meta: 42 of 200 runs
+#   # cancelled (21%) — 42 merged diffs never reviewed by anything.
+#   #
+#   # The trade is deliberate. Without a group, two overlapping runs can double-file one
+#   # finding (the title/location dedup closes most of it, but not a same-instant race).
+#   # A duplicate issue is visible and recoverable; a missed diff is neither.
 #
 #   jobs:
 #     capture:
+#       # Pin at or after #148 — see "PR-time ingest needs a pin at/after #148" below.
 #       uses: infra-commons/security/.github/workflows/capture-findings-reusable.yml@<SHA>
 #       with:
 #         severity_floor: HIGH   # optional; empty/omitted defaults to HIGH (historical)
@@ -44,6 +58,15 @@ name: Capture security findings (reusable)
 #         # Optional (infra-commons/meta#661) — omit entirely until this org has provisioned the
 #         # secret; a newly-filed CRITICAL/HIGH just won't be board-added, nothing else changes:
 #         INFRA_COMMONS_BOT_PRIVATE_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+#
+# PR-time ingest needs a pin at or after #148 (b4d7507).
+#
+# Source 1 (the PR-time reviewers' comments) needs `pull-requests: read`, which is minted
+# on the App token by the step below — and only from #148 onward. A caller pinned earlier
+# still runs, still files everything its own post-merge pass finds, and still exits
+# identically; it just ingests NOTHING from either PR-time reviewer. That is no longer
+# silent: the run says so on stderr, in the job-summary notes with the remedy, and in the
+# capture receipt's "PR read access" row.
 #
 # The caller workflow must grant:
 #   permissions:
@@ -145,8 +168,13 @@ jobs:
           # already holds `pull_requests` in every org, so minting it here needs no caller change
           # at all — only the pin bump any change to this file needs.
           #
-          # capture.py tries `github.token` FIRST and falls back to this, so a caller still on an
-          # older pin degrades to commit-subject PR resolution rather than breaking. The winning
+          # capture.py tries `github.token` FIRST and falls back to this. A caller still on an
+          # older pin does NOT degrade to commit-subject PR resolution — it stops: that fallback
+          # verifies each candidate against `/issues/{N}`, which for a pull-request number needs
+          # the same access as the `/commits/{sha}/pulls` lookup whose refusal invoked it, so the
+          # same missing key shuts both doors (measured, infra-commons/meta run 33673760827,
+          # 2026-09-02). Such a run now reports the refusal and this remedy instead of an
+          # innocuous "no merged pull request resolved". The winning
           # credential is named in the "PR resolution" row of the job summary's capture receipt —
           # which credential can read pull requests here is a per-caller fact that only a live 200
           # answers. That was described here before it was implemented: _get_json() returned on the
