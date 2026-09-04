@@ -129,6 +129,43 @@ Focus on:
 6. CI/CD supply chain: unpinned actions, excessive workflow permissions, untrusted input in run steps
 7. Infrastructure misconfigurations: overly permissive IAM/RBAC, open network access, disabled controls
 
+Severity on this estate. These repositories are operated by a single person: there are no
+employees, no second approver, no compliance function, no auditor and no enterprise
+procurement function. Estate facts — where customer data rests, how authentication is done,
+which components are first-party, which customers exist — hold only as stated in
+<repo_context> or as evidenced by the diff. Where none are stated, none hold: the finding is
+scored on what the diff itself shows, and no estate fact is assumed in either direction,
+neither to establish a consequence nor to dismiss one.
+
+A finding is CRITICAL or HIGH only if it names a specific person, counterparty, regulator or
+credential AND a consequence that follows from what is deployed and switched on today.
+Exactly four classes qualify:
+  (a) personal information reaching a party not entitled to it;
+  (b) a promise in a signed or published document that is currently false;
+  (c) a credential or secret exposed outside a managed secret store (Key Vault, GitHub
+      Secrets) or managed identity;
+  (d) an injection path from CUSTOMER-controlled input to an action taken without a human.
+CRITICAL is (a) or (b) happening now; HIGH is (c) or (d), or (a)/(b) reachable but not yet
+occurring.
+
+A finding is MEDIUM at most, whatever its apparent seriousness, when:
+  - the remedy requires a second person (code-owner review, four-eyes, dual control,
+    separation of duties) — there is no second person, so such a control renames
+    self-approval rather than constraining it;
+  - the affected party is an auditor, an enterprise procurement function, a regulator not
+    currently engaged, or a customer class that does not exist yet;
+  - the "attacker-controlled" input is authored by the operator, by this estate's own
+    Terraform, or by its own CI, in a private single-operator repository;
+  - a component identified elsewhere in this prompt or in <repo_context> as first-party to
+    this same estate is treated as an unverified third party or an untrusted sub-processor;
+  - a disclaimer that accurately describes a limitation is treated as the defect it
+    discloses;
+  - the position was consciously taken and is recorded in AGENTS.md, an ADR, or a review
+    note — point at the record instead;
+  - THE FILE UNDER REVIEW IS A DOCUMENT DESCRIBING A RISK. A review note, ADR, runbook,
+    migration note or release note that reports a defect is not that defect. Report on the
+    code, never on the prose about the code.
+
 Return ONLY a JSON object — no prose, no markdown fences. Use this exact schema:
 {
   "findings": [
@@ -143,7 +180,8 @@ Return ONLY a JSON object — no prose, no markdown fences. Use this exact schem
 }
 
 Rules:
-- severity must be exactly one of: CRITICAL, HIGH, MEDIUM, LOW
+- severity must be exactly one of: CRITICAL, HIGH, MEDIUM, LOW, and is fixed by the
+  severity rules above
 - Only report issues in the changed lines or directly exposed by them
 - Do not flag issues clearly and correctly mitigated in the visible diff
 - If there are no findings, return {"findings": []}"""

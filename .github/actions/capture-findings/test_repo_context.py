@@ -66,6 +66,48 @@ def test_both_actions_share_the_same_neutral_paragraph():
     assert anchor in capture.SYSTEM_PROMPT
 
 
+# ── Severity rubric (R1 item 2) ─────────────────────────────────────────────────
+
+# Short, stable phrases rather than a whole-block equality check: the rubric is a
+# single shared text, but asserting the full 36 lines match would break this
+# directory's tests on any in-flight edit to the other action.
+_RUBRIC_ANCHORS = [
+    # The scoring rule itself: without the four-class test, "HIGH" is undefined and
+    # the model scores on vibes — which is what this file's prompt did until now.
+    "Exactly four classes qualify",
+    "A finding is MEDIUM at most",
+    # The clause that makes the shared-rule / repo-context split safe. It keys on
+    # facts-not-stated, NOT on <repo_context> being absent, and that distinction is
+    # load-bearing: get_repo_context() concatenates whichever of CONTEXT_FILES exist,
+    # so a repo carrying only a README (infra-commons/security itself, at the time of
+    # writing) produces a NON-EMPTY block that states no estate facts at all. A guard
+    # written as "if no <repo_context> block is present" would almost never fire there.
+    "Where none are stated, none hold",
+]
+
+
+@pytest.mark.parametrize("anchor", _RUBRIC_ANCHORS)
+def test_post_merge_prompt_defines_the_severities_it_assigns(anchor):
+    # This prompt's findings BLOCK promotes: CRITICAL/HIGH become individual issues
+    # and board cards, everything below rolls into the digest. The severity was being
+    # assigned by a model that had never been told what the words mean.
+    assert anchor in capture.SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("anchor", _RUBRIC_ANCHORS)
+def test_both_actions_share_the_same_severity_rubric(anchor):
+    # Same reasoning as test_both_actions_share_the_same_neutral_paragraph above:
+    # two independently-worded prompts is exactly how #79's two different hardcoded
+    # premises came to exist. PR-time and post-merge must score alike, or a finding's
+    # severity depends on which pass happened to catch it.
+    adv_path = _ACTION_DIR.parent / "adversarial-review" / "adversarial-review.py"
+    adv_spec = importlib.util.spec_from_file_location("adversarial_review", adv_path)
+    adv = importlib.util.module_from_spec(adv_spec)
+    adv_spec.loader.exec_module(adv)
+    assert anchor in adv.SYSTEM_PROMPT
+    assert anchor in capture.SYSTEM_PROMPT
+
+
 # ── get_repo_context() (ported mechanism) ─────────────────────────────────────────
 
 def test_get_repo_context_returns_empty_when_no_context_files_present(tmp_path, monkeypatch):
