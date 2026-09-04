@@ -129,7 +129,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@d758e6aa29b8953ec6aabc89f5a08e3442982118 # adversarial-review/v1.15.0
+        uses: infra-commons/security/.github/actions/adversarial-review@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # adversarial-review/v1.16.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -156,7 +156,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@d758e6aa29b8953ec6aabc89f5a08e3442982118 # adversarial-review/v1.15.0
+        uses: infra-commons/security/.github/actions/adversarial-review@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # adversarial-review/v1.16.0
         with:
           provider: openai
           api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -227,14 +227,14 @@ jobs:
       # inline shell they were reachable only in production, which is where
       # this gate's worst failure mode kept being discovered.
       #
-      # The SHA below is the adversarial-review/v1.15.0 release commit, shared with
+      # The SHA below is the adversarial-review/v1.16.0 release commit, shared with
       # the two reviewer steps above so one release is one SHA in this file. It is
       # deliberately NOT tagged in this action's own family: no
       # `adversarial-review-gate/vX.Y.Z` tag exists past v1.3.0, and the moving
       # `adversarial-review-gate/v1` still points at 01fff5eb, which predates the
-      # gate fix in #135. That did NOT change when v1.15.0 was released on
-      # 2026-09-04: the release cut `adversarial-review/v1.15.0` and
-      # `capture-findings/v1.15.0` and left `adversarial-review-gate/v1` where it
+      # gate fix in #135. That did NOT change when v1.16.0 was released on
+      # 2026-09-04: the release cut `adversarial-review/v1.16.0` and
+      # `capture-findings/v1.16.0` and left `adversarial-review-gate/v1` where it
       # was, because the gate family is not in the release set at all — its only
       # `uses:` is this SHA pin, which `discover_pins()` ignores by design, and
       # there is no `adversarial-review-gate-reusable.yml` to discover it by name.
@@ -242,14 +242,17 @@ jobs:
       # revisions of this line claimed `adversarial-review-gate/v1.9.0` and
       # `v1.11.0`, neither of which has ever existed.
       #
-      # This bump is a no-op for the gate's RUNTIME: `action.yml` and `gate.py` are
-      # byte-identical between 227529b2 and d758e6aa, and unchanged since #135
-      # (1241d6a8). Only `test_gate_wiring.py` differs across that span (#151), so
-      # nothing the gate executes moves here — but the directory is not unchanged,
-      # which the previous wording implied.
+      # This bump is a no-op for the gate's RUNTIME, and this time for the whole
+      # directory: every file under `.github/actions/adversarial-review-gate/` is
+      # byte-identical between d758e6aa (v1.15.0) and 2b68d5ed (v1.16.0) — not only
+      # `action.yml` and `gate.py`, which remain unchanged since #135 (1241d6a8).
+      # Do not carry this sentence forward unverified: the v1.15.0 bump did move a
+      # file in this directory (`test_gate_wiring.py`, #151), so the claim has to be
+      # re-derived per bump rather than copied. The v1.16.0 payload (#158) lands
+      # entirely in the reviewer composite.
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@d758e6aa29b8953ec6aabc89f5a08e3442982118 # = adversarial-review/v1.15.0
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # = adversarial-review/v1.16.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
