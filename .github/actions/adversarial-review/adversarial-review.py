@@ -891,23 +891,82 @@ def load_suppressions() -> list[dict]:
 
 MAX_SUPPRESSIONS_PER_REVIEW = 10
 
+# How much of a matched CRITICAL finding to echo back in the "not applied" notice.
+# Enough to identify which finding it was; not enough to reprint the review inside
+# a callout that sits directly above it.
+_INERT_EXCERPT_CHARS = 200
 
-def apply_suppressions(review: str, suppressions: list[dict]) -> tuple[str, list[str]]:
+
+def _finding_line_content(stripped: str) -> str | None:
+    """Return a review bullet's substance, or None if it is not a real finding.
+
+    A section that found nothing still carries a bullet (`- None.`), and a bullet
+    may or may not carry a `[file:line]` prefix. `has_critical_findings` and the
+    CRITICAL carve-out notice both need the same answer to "is this an actual
+    finding?", so they share one definition instead of keeping two that can drift.
+    The notice needs it particularly: a broad `file_pattern` such as `.*` matches
+    the empty file-ref of a `- None.` placeholder, so without this guard the
+    notice would fire on every clean review.
+    """
+    if not re.match(r'^-\s+', stripped):
+        return None
+    content = re.sub(r'^-\s+', '', stripped)
+    content = re.sub(r'^\[.*?\]\s*', '', content)  # strip [file:line] prefix
+    if not content or re.match(r'^[Nn]one[.!?\s]*$', content):
+        return None
+    return content
+
+
+def _matching_suppression(stripped: str, suppressions: list[dict]) -> dict | None:
+    """First suppression whose file_pattern AND finding_pattern both match.
+
+    file_pattern is applied only to the [file:line] prefix, not the full
+    description — this prevents a crafted description that mentions a filename
+    from triggering a suppression intended for a different file.
+    """
+    file_ref_m = re.match(r'-\s+\[([^\]]+)\]', stripped)
+    file_ref = file_ref_m.group(1) if file_ref_m else ""
+    return next(
+        (s for s in suppressions
+         if re.search(s.get("file_pattern", ""), file_ref, re.IGNORECASE)
+         and re.search(s.get("finding_pattern", ""), stripped, re.IGNORECASE)),
+        None,
+    )
+
+
+def apply_suppressions(
+    review: str, suppressions: list[dict]
+) -> tuple[str, list[str], list[tuple[str, str]]]:
     """Remove suppressed findings from review text.
 
     CRITICAL findings are never suppressed — they always block merge. Only
     HIGH/MEDIUM/LOW findings can be suppressed.
 
+    That carve-out is deliberate and fail-closed, and it stays. What changed is
+    that it used to be SILENT: an entry aimed at a CRITICAL was never consulted,
+    so it was never reported as matched-and-skipped either. The suppressions file
+    accepted an entry the gate would never honour, and the author found out weeks
+    later at the next red gate (infra-commons/security#117). Such a match is now
+    reported — to stderr here, and to the PR comment by the caller.
+
+    This is a visibility change only. `filtered_review` is byte-identical to what
+    it was before, a CRITICAL still reaches `has_critical_findings()` and still
+    blocks the merge, and the third return value is exactly the set of CRITICAL
+    lines the HIGH/MEDIUM/LOW path WOULD have suppressed had the carve-out not
+    existed.
+
     Suppressions are loaded from the base branch only, so a PR cannot activate
     its own suppression entries. Each suppression requires BOTH file_pattern AND
     finding_pattern to match. A hard cap limits blast radius.
 
-    Returns (filtered_review, list_of_suppressed_entries_for_details_block).
+    Returns (filtered_review, suppressed_entries_for_details_block,
+    inert_on_critical as (entry_id, finding_excerpt) pairs).
     """
     if not suppressions:
-        return review, []
+        return review, [], []
 
     suppressed_entries: list[str] = []
+    inert_on_critical: list[tuple[str, str]] = []
     filtered_lines: list[str] = []
     in_critical_section = False
     cap_warned = False
@@ -919,7 +978,32 @@ def apply_suppressions(review: str, suppressions: list[dict]) -> tuple[str, list
             in_critical_section = False
 
         stripped = line.strip()
-        if not stripped.startswith("- [") or in_critical_section:
+        if not stripped.startswith("- ["):
+            filtered_lines.append(line)
+            continue
+
+        if in_critical_section:
+            # Report-only, and deliberately BEFORE the cap check: an inert match
+            # suppresses nothing, so charging it to MAX_SUPPRESSIONS_PER_REVIEW
+            # would let CRITICALs starve real suppressions. Its own list is
+            # bounded separately so the notice cannot flood the comment. The line
+            # is passed through unfiltered exactly as before — the carve-out is
+            # unchanged; all that is new is that the author is told about it.
+            match = _matching_suppression(stripped, suppressions)
+            if (
+                match
+                and _finding_line_content(stripped)
+                and len(inert_on_critical) < MAX_SUPPRESSIONS_PER_REVIEW
+            ):
+                entry_id = match.get("id", "unknown")
+                excerpt = re.sub(r'^-\s+', '', stripped)[:_INERT_EXCERPT_CHARS]
+                inert_on_critical.append((entry_id, excerpt))
+                print(
+                    f"Warning: suppression '{entry_id}' matched a CRITICAL finding and was "
+                    "NOT applied — CRITICAL findings are never suppressed. The entry is "
+                    "inert on this gate.",
+                    file=sys.stderr,
+                )
             filtered_lines.append(line)
             continue
 
@@ -934,17 +1018,7 @@ def apply_suppressions(review: str, suppressions: list[dict]) -> tuple[str, list
             filtered_lines.append(line)
             continue
 
-        # Apply file_pattern only to the [file:line] prefix, not the full
-        # description — prevents a crafted description that mentions a filename
-        # from triggering a suppression intended for a different file.
-        file_ref_m = re.match(r'-\s+\[([^\]]+)\]', stripped)
-        file_ref = file_ref_m.group(1) if file_ref_m else ""
-        match = next(
-            (s for s in suppressions
-             if re.search(s.get("file_pattern", ""), file_ref, re.IGNORECASE)
-             and re.search(s.get("finding_pattern", ""), stripped, re.IGNORECASE)),
-            None,
-        )
+        match = _matching_suppression(stripped, suppressions)
         if match:
             reason = match.get("reason", "Documented false positive.").strip()
             suppressed_entries.append(
@@ -954,7 +1028,35 @@ def apply_suppressions(review: str, suppressions: list[dict]) -> tuple[str, list
         else:
             filtered_lines.append(line)
 
-    return "\n".join(filtered_lines), suppressed_entries
+    return "\n".join(filtered_lines), suppressed_entries, inert_on_critical
+
+
+def render_inert_suppression_notice(inert: list[tuple[str, str]]) -> str:
+    """Visible callout for suppression entries that matched a CRITICAL.
+
+    Deliberately NOT folded into the `<details>` suppression trail. That block is
+    titled "acknowledged false positives"; these entries were NOT applied, so
+    filing them there would assert the opposite of what happened. It would also
+    bury the one line the author needs behind a disclosure triangle on the exact
+    run where the gate is red — and the block is not rendered at all when nothing
+    else was suppressed, which is the common case here.
+
+    Rendered as a continuation of the header blockquote (a bare `>` opens a new
+    paragraph inside it), matching how the advisory note is spliced in.
+    """
+    if not inert:
+        return ""
+    entries = "\n".join(f"> - `{entry_id}` matched: {finding}" for entry_id, finding in inert)
+    return (
+        ">\n"
+        "> ⚠️ **A suppression entry matched a CRITICAL finding and was NOT applied.**\n"
+        "> CRITICAL findings are never suppressed — they always block merge, by design.\n"
+        "> The entries below are **inert on this gate**. Note the asymmetry: the same entry\n"
+        "> IS honoured by the post-merge `capture-findings` path, which has no such carve-out.\n"
+        "> Fix the finding or get a human verdict on it — the entry will not clear this gate.\n"
+        ">\n"
+        f"{entries}\n"
+    )
 
 
 # ── Finding detection ───────────────────────────────────────────────────────────
@@ -969,14 +1071,8 @@ def has_critical_findings(review: str) -> bool:
         return False
     section = m.group(1).strip()
     for line in section.splitlines():
-        stripped = line.strip()
-        if not re.match(r'^-\s+', stripped):
-            continue
-        content = re.sub(r'^-\s+', '', stripped)
-        content = re.sub(r'^\[.*?\]\s*', '', content)  # strip [file:line] prefix
-        if not content or re.match(r'^[Nn]one[.!?\s]*$', content):
-            continue
-        return True
+        if _finding_line_content(line.strip()):
+            return True
     return False
 
 
@@ -1380,9 +1476,14 @@ def main() -> None:
             return
         raise
 
-    filtered_review, suppressed = apply_suppressions(review, suppressions)
+    filtered_review, suppressed, inert_suppressions = apply_suppressions(review, suppressions)
     if suppressed:
         print(f"Suppressed {len(suppressed)} finding(s) via suppressions file.")
+    if inert_suppressions:
+        print(
+            f"{len(inert_suppressions)} suppression match(es) landed inside the CRITICAL "
+            "section and were NOT applied — reported in the PR comment."
+        )
 
     critical = has_critical_findings(filtered_review)
     # An advisory reviewer still reports everything it found; it just does not
@@ -1399,6 +1500,8 @@ def main() -> None:
             "CI/CD), so this reviewer runs as a second opinion here. **Read the CRITICAL "
             "findings below and judge them on their merits before merging.**\n"
         )
+
+    inert_note = render_inert_suppression_notice(inert_suppressions)
 
     suppressed_section = ""
     if suppressed:
@@ -1418,7 +1521,7 @@ def main() -> None:
         f"> **AI-generated by {label} {model}** — treat findings as a starting point, not a final verdict.\n"
         f"> Dismiss only after confirming a finding is mitigated or a false positive.\n"
         f"> Commit: `{head_sha[:8]}`\n"
-        f"{advisory_note}\n"
+        f"{advisory_note}{inert_note}\n"
         f"{filtered_review}{suppressed_section}\n\n"
         f"---\n"
         f"*Posted by the adversarial-review reusable workflow*"

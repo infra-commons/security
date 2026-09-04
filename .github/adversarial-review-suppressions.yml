@@ -29,6 +29,17 @@
 # adversarial-review gate (`adversarial-review.py::apply_suppressions()`) matches over
 # unstructured Markdown with no `category` to anchor on, and ignores this key if present.
 #
+# WARNING: an entry aimed at a CRITICAL finding is INERT on the PR-time gate. By design
+# (fail-closed), `adversarial-review.py::apply_suppressions()` never suppresses anything inside
+# the reviewer's `### CRITICAL` section — a CRITICAL always blocks merge until a human looks.
+# The carve-out is correct and is not going away; what changed (infra-commons/security#117) is
+# that it is no longer silent — when an entry's patterns match a CRITICAL, the PR comment now
+# says so by name and the job log warns, instead of the author discovering weeks later that the
+# entry never did anything. Note the asymmetry: `capture.py::is_suppressed()` (the post-merge
+# path) has NO such carve-out, so the SAME entry in THIS file is honoured there and ignored at
+# PR time. If a CRITICAL is a false positive, fix the finding or get a human verdict on it —
+# an entry here will not clear that gate.
+#
 # WARNING: `file_pattern` is matched against `location`, NOT against a bare path. capture.py's
 # reviewer prompt specifies `"location": "path/to/file:line_number"`, so a real finding's
 # location ALWAYS carries a `:line` (or `:line-line`) suffix. A pattern ending in a bare `$`
