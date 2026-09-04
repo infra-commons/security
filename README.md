@@ -131,7 +131,16 @@ every pin, including one from years ago. Both `uses:` lines inside that reusable
 pinned to commit SHAs instead — see its own header comment for the full rationale and the
 manual bump procedure. `release-composites.yml` still cuts `adversarial-review/vX.Y.Z`
 immutable release tags (useful as the SHA source for the next bump) but no longer delivers
-either composite via a moving tag.
+either composite via a moving tag *at that ref or later*.
+
+That qualifier is load-bearing, not pedantry. A caller pins the **reusable**, so a caller
+pinned at a pre-#95 ref still runs a copy of that file whose composite `uses:` lines are
+moving tags, and still resolves them at run time. Measured 2026-09-04 across the fleet,
+one caller is in exactly that state — the reusable's own header names it. So both moving
+tags are still live refs, and `adversarial-review-gate/v1` in particular is now released
+by nothing and verified by nothing: it owns no `<family>-reusable.yml` to be discovered by
+name, and its only `uses:` is a SHA pin that `discover_pins()` ignores by design, so it
+falls out of both halves of the mechanism described below.
 
 `pin-check.yml` carries a narrow, deliberate exception for own-repo `.github/actions/*`
 refs on a `<family>/vN` tag (see `.github/scripts/check-action-pins.sh`); our own

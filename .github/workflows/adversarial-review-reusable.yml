@@ -52,8 +52,25 @@ name: Adversarial review (reusable)
 # `release-composites.yml` still cuts `<family>/vX.Y.Z` immutable release tags
 # for `adversarial-review` (its moving tag is still tracked as a side effect of
 # this file being part of that family's surface, per #63) — that immutable tag
-# is the natural source for the SHA to bump to, even though nothing here
-# resolves the moving tag itself anymore.
+# is the natural source for the SHA to bump to, even though nothing at THIS ref
+# resolves either moving tag anymore.
+#
+# "At this ref" is the whole of that claim, and it is not the same as "the moving
+# tags are dead". A caller pins THIS FILE, so a caller pinned at a pre-#95 ref runs
+# a copy of this file whose composite `uses:` lines are still
+# `@adversarial-review/v1` and `@adversarial-review-gate/v1` — and those resolve at
+# run time, today, from whatever the tags point at now. Measured 2026-09-04 across
+# 353 workflow files in 44 repos and 5 orgs, exactly one caller is in that state:
+#
+#   rolliq-com/website/.github/workflows/security.yml:19
+#     -> adversarial-review-reusable.yml@01dd49e6 (2026-08-08, pre-#95)
+#     -> line 168 of that copy: adversarial-review-gate@adversarial-review-gate/v1
+#
+# That workflow is `active` and triggers on `pull_request`, so it is a live merge
+# gate resolving a moving tag nothing releases and nothing verifies. Named here so
+# the next person reasoning about the gate family's tags does not have to re-measure
+# the fleet to find it, and so that "retire those tags" is understood to break a
+# production gate until that caller is repinned.
 #
 # ── What enabling the second reviewer does, and does not, buy ────────────────
 # The gate result is three-state, not boolean (see the gate action's script):
@@ -231,16 +248,36 @@ jobs:
       # the two reviewer steps above so one release is one SHA in this file. It is
       # deliberately NOT tagged in this action's own family: no
       # `adversarial-review-gate/vX.Y.Z` tag exists past v1.3.0, and the moving
-      # `adversarial-review-gate/v1` still points at 01fff5eb, which predates the
-      # gate fix in #135. That did NOT change when v1.16.0 was released on
-      # 2026-09-04: the release cut `adversarial-review/v1.16.0` and
-      # `capture-findings/v1.16.0` and left `adversarial-review-gate/v1` where it
-      # was, because the gate family is not in the release set at all — its only
-      # `uses:` is this SHA pin, which `discover_pins()` ignores by design, and
-      # there is no `adversarial-review-gate-reusable.yml` to discover it by name.
+      # `adversarial-review-gate/v1` still points at 01fff5eb (2026-08-15). That did
+      # NOT change when v1.16.0 was released on 2026-09-04: the release cut
+      # `adversarial-review/v1.16.0` and `capture-findings/v1.16.0` and left
+      # `adversarial-review-gate/v1` where it was, because the gate family is not in
+      # the release set at all — its only `uses:` is this SHA pin, which
+      # `discover_pins()` ignores by design, and there is no
+      # `adversarial-review-gate-reusable.yml` to discover it by name.
       # The comment therefore names the release, not a gate-family tag — earlier
       # revisions of this line claimed `adversarial-review-gate/v1.9.0` and
       # `v1.11.0`, neither of which has ever existed.
+      #
+      # WHAT THAT STALE TAG COSTS, AND WHAT IT DOES NOT — measured 2026-09-04, and
+      # written down because the obvious reading of the paragraph above is worse than
+      # the truth and has now been drawn twice from two separate sessions. The tag is
+      # older than #135, but #135 IS NOT IN THIS ACTION: `git show --stat 1241d6a8`
+      # lands in THIS FILE plus `test_gate_wiring.py`, and #151 (f8b22aa0) has the
+      # same shape. Diff the only two files this action executes and there is nothing
+      # between the tag and `main`:
+      #
+      #   git diff adversarial-review-gate/v1 origin/main -- \
+      #     .github/actions/adversarial-review-gate/gate.py     # empty
+      #     .github/actions/adversarial-review-gate/action.yml  # empty
+      #
+      # The gate's executed code has not moved since #99 (ab86114), so the one caller
+      # still resolving that moving tag (named in this file's header) runs the same
+      # gate as every SHA-pinned caller. The tag is stale in name, not in behaviour.
+      # Re-derive that per change rather than carrying this forward: the moment
+      # `gate.py` or `action.yml` changes, that caller silently stops matching, and
+      # nothing in this repo goes red — the gate family is in no release set and no
+      # verify set, so there is no check to fail.
       #
       # This bump is a no-op for the gate's RUNTIME, and this time for the whole
       # directory: every file under `.github/actions/adversarial-review-gate/` is
