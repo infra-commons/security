@@ -15,6 +15,12 @@ name: Release composites
 # with no per-caller pin bump to review them first, so the test jobs are the
 # only automated check between an edit here and the fleet.
 
+# This workflow was left `disabled_manually` from 2026-09-04's freeze handling until
+# 2026-09-08, so no push-triggered release ran in that window even though main moved
+# twice more (1f9d9209, 19e03ebe) after the disable. Re-enabled 2026-09-08; this
+# comment-only commit is a deliberate, harmless push to re-arm the push -> Tests ->
+# release chain, since `workflow_dispatch` alone cannot satisfy the release job's
+# `event == 'push'` condition below. Operator-approved (infra-commons/meta#1357).
 on:
   workflow_run:
     workflows: ["Tests"]
