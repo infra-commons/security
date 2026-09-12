@@ -1,8 +1,9 @@
 name: Capture security findings on merge
 description: >-
-  Reviews the diff of a single merge to the default branch and files each
-  non-suppressed HIGH/MEDIUM/LOW finding as a tracked GitHub Issue. The
-  per-merge catch-all for findings the PR gate (CRITICAL-only) lets through.
+  Reviews the diff of a single merge to the default branch, files each non-suppressed
+  CRITICAL/HIGH finding as an individual tracked GitHub Issue, and rolls MEDIUM/LOW into
+  one rolling digest issue per repo. The per-merge catch-all for findings the PR gate
+  (CRITICAL-only) lets through.
 
 inputs:
   api-key:
@@ -25,10 +26,10 @@ inputs:
     required: true
   severity-floor:
     description: >-
-      Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that gets an individual
-      GitHub Issue; findings below it roll into the rolling MEDIUM/LOW digest
-      instead. Empty defaults to HIGH (CRITICAL+HIGH individual, MEDIUM+LOW
-      digest — the historical behaviour).
+      DEPRECATED and IGNORED since infra-commons/meta#1357. CRITICAL/HIGH are always
+      individual GitHub Issues and MEDIUM/LOW always roll into the digest. Still declared
+      and still forwarded so a caller that passes one does not hard-fail and gets a warning
+      naming the dead value instead of silence.
     required: false
     default: ""
   board-app-token:

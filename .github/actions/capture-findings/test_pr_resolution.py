@@ -411,7 +411,9 @@ def test_receipt_rows_all_exist_in_a_new_receipt():
 
 
 def test_findings_are_capped_and_the_cap_is_reported(monkeypatch):
-    """A caller on severity_floor: LOW puts both reviewers' LOW bullets in scope."""
+    """Both reviewers' LOW bullets are still ingested — they route to the digest rather than
+    to individual issues since infra-commons/meta#1357 — so the cap still governs how many
+    reach it, and must still drop the lowest severities first."""
     body = (
         "<!-- adversarial-review-bot -->\n## Security findings\n\n"
         "### LOW — best-practice\n"
