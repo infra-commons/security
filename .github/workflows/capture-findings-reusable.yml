@@ -1,7 +1,12 @@
 name: Capture security findings (reusable)
 
-# Reusable post-merge findings capture. Files CRITICAL/HIGH/MEDIUM/LOW findings as
-# tracked GitHub Issues — complementing the CRITICAL gate that runs at PR time.
+# Reusable post-merge findings capture. Files CRITICAL/HIGH findings as individual
+# tracked GitHub Issues, and rolls MEDIUM/LOW into ONE digest issue per repo, updated in
+# place — complementing the CRITICAL gate that runs at PR time.
+#
+# MEDIUM/LOW never get an issue each (infra-commons/meta#1357). That was the default from
+# #34 onward, but `severity_floor` let a caller opt back in and two had; it is now fixed in
+# capture.py and no caller can change it. See the `severity_floor` input below.
 #
 # "Complementing", not "duplicating": this runs AFTER the merge, so any CRITICAL it
 # files as a new issue is one the PR-time gate did not block. That is why CRITICALs
@@ -51,8 +56,6 @@ name: Capture security findings (reusable)
 #     capture:
 #       # Pin at or after #148 — see "PR-time ingest needs a pin at/after #148" below.
 #       uses: infra-commons/security/.github/workflows/capture-findings-reusable.yml@<SHA>
-#       with:
-#         severity_floor: HIGH   # optional; empty/omitted defaults to HIGH (historical)
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         # Optional (infra-commons/meta#661) — omit entirely until this org has provisioned the
@@ -80,10 +83,13 @@ on:
     inputs:
       severity_floor:
         description: >-
-          Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that gets an individual
-          GitHub Issue; findings below it roll into the rolling MEDIUM/LOW
-          digest instead. Empty defaults to HIGH — CRITICAL+HIGH individual,
-          MEDIUM+LOW digest — the historical, previously-hardcoded behaviour.
+          DEPRECATED and IGNORED since infra-commons/meta#1357. CRITICAL/HIGH are always
+          filed as individual GitHub Issues and MEDIUM/LOW always roll into the digest;
+          nothing you pass here changes that. Still declared ONLY so the callers that
+          currently pass it do not hard-fail — an undefined input is a run-start error for
+          a reusable workflow, not a warning — so a caller can drop it at leisure rather
+          than in lockstep with its next pin bump. Passing anything but HIGH prints a
+          warning naming the value and says so in the run's job summary. Remove it.
         type: string
         required: false
         default: ""

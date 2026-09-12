@@ -15,7 +15,9 @@ This is DETECTION, not prevention. By the time this script runs, the merge has
 already landed on the default branch. Exit-1 on a CRITICAL makes the workflow
 run visibly red and demands attention, but it does not undo the commit.
 
-HIGH/MEDIUM/LOW findings are filed as GitHub issues and the workflow exits 0.
+CRITICAL/HIGH findings are filed as individual GitHub issues; MEDIUM/LOW always roll
+into one rolling digest issue per repo, never one issue each (infra-commons/meta#1357).
+A run that files only HIGH and digest rows exits 0.
 CRITICAL findings are also filed as issues and the workflow exits 1 — the run
 goes red so a post-merge CRITICAL cannot be silently ignored. The run also goes
 red when the post-merge pass produced no usable review (errored, empty, truncated,
@@ -37,10 +39,12 @@ Required env vars:
   RUN_URL          URL of the current workflow run
 
 Optional env vars:
-  INDIVIDUAL_SEVERITY_FLOOR   Lowest severity (CRITICAL|HIGH|MEDIUM|LOW) that
-                              gets an individual issue; below it, findings roll
-                              into the rolling MEDIUM/LOW digest instead.
-                              Empty/unset defaults to HIGH (historical behaviour).
+  INDIVIDUAL_SEVERITY_FLOOR   Accepted and IGNORED (infra-commons/meta#1357).
+                              CRITICAL/HIGH are always individual issues, MEDIUM/LOW
+                              always digest. Still declared by the reusable and the
+                              composite so a caller that passes one does not hard-fail,
+                              and still read here so such a caller gets a warning
+                              naming the dead value — see severity_floor_note().
   BOARD_APP_TOKEN             App installation token. Adds a filed CRITICAL or HIGH
                               to the org board, and is the fallback credential for
                               reading PR-time review comments (see the ingest section).
@@ -1057,6 +1061,8 @@ def new_receipt() -> dict:
         "suppressed": 0,
         "filed": 0,
         "digested": 0,
+        # Bounded: either the constant below or the fixed "ignored" variant set in main().
+        "individual_scope": "CRITICAL+HIGH",
     }
 
 
@@ -1071,6 +1077,7 @@ _RECEIPT_ROWS = (
     ("suppressed", "Suppressed"),
     ("filed", "Issues filed"),
     ("digested", "Digested"),
+    ("individual_scope", "Individual issues"),
 )
 
 
@@ -1600,10 +1607,11 @@ def ingest_pr_review_findings(
         if not saw_marker:
             notes.append(f"no adversarial-review comment found on #{number}")
 
-    # Cap, highest severity first. Required because a caller may set
-    # severity_floor: LOW (rolliq-com/operations does), which puts both reviewers'
-    # MEDIUM and LOW bullets in scope on every merge — plausibly dozens of issues on
-    # the first run after this ships. Truncation is loud, never silent.
+    # Cap, highest severity first. Both reviewers' MEDIUM and LOW bullets are in scope on
+    # every merge — they route to the digest rather than to individual issues since
+    # infra-commons/meta#1357, but they still pass through this list and can crowd out the
+    # severities that do get filed. Sorting first is what guarantees CRITICAL/HIGH survive
+    # the truncation. Truncation is loud, never silent.
     findings.sort(
         key=lambda f: _SEVERITY_ORDER.index(f["severity"]) if f.get("severity") in _SEVERITY_ORDER else 0,
         reverse=True,
@@ -1612,7 +1620,7 @@ def ingest_pr_review_findings(
         notes.append(
             f"ingested PR-time findings capped at {_MAX_PR_FINDINGS_PER_RUN} of "
             f"{len(findings)} parsed (lowest severities dropped) — raise "
-            "_MAX_PR_FINDINGS_PER_RUN or raise the caller's severity_floor"
+            "_MAX_PR_FINDINGS_PER_RUN"
         )
         findings = findings[:_MAX_PR_FINDINGS_PER_RUN]
     return findings, notes
@@ -1816,23 +1824,66 @@ def issue_body(finding: dict, merge_sha: str, repo: str, run_url: str) -> str:
 # only sees the current merge's diff, new rows are APPENDED to the existing
 # digest (deduplicated by location) rather than replacing it wholesale.
 
-# Severities that become individual issues vs. roll into the digest are governed
-# by a floor: severities AT OR ABOVE the floor are individual, the rest digest.
-# Configurable via the INDIVIDUAL_SEVERITY_FLOOR env var (workflow_call input
-# `severity_floor`, plumbed through capture-findings-reusable.yml); empty/unset
-# defaults to "HIGH" — CRITICAL+HIGH individual, MEDIUM+LOW digest — which is the
-# historical, hardcoded behaviour this floor replaces.
+# CRITICAL and HIGH get individual issues; MEDIUM and LOW ALWAYS roll into the rolling
+# digest. This set is fixed and no caller can change it (infra-commons/meta#1357): one
+# issue per MEDIUM/LOW finding was the noise the operator cut, and a per-caller knob made
+# that a default rather than a guarantee — two callers (rolliq-com/marketing and
+# rolliq-com/operations) had opted back into it.
+#
+# `severity_floor` was that knob, between #41 and #1357. It is still ACCEPTED by the
+# reusable and the composite, and still arrives here, but it is INERT:
+#
+#   * Still declared, because passing an undefined input to a reusable workflow is a hard
+#     error at run start, not a warning. Three callers still pass one; deleting the input
+#     would strand each of them the moment it bumped its pin — the one moment a new failure
+#     mode is least welcome.
+#   * Still read, because a clamp applied further up (action.yml pinning the env var to
+#     HIGH) would destroy the evidence: this module could no longer tell "caller passed
+#     nothing" from "caller asked for LOW", and the caller would never learn its setting is
+#     dead. severity_floor_note() below is what closes that.
+#
+# The clamp is symmetric — CRITICAL is clamped DOWN as well. A caller asking for
+# CRITICAL-only would demote HIGH into the digest, which contradicts "HIGH stays filing
+# exactly as it does today", and it is the only input that can put a non-MEDIUM/LOW
+# severity into a digest row (see _DIGEST_ROW_RE below).
 _SEVERITY_ORDER = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 _DEFAULT_INDIVIDUAL_FLOOR = "HIGH"
+_INDIVIDUAL_SEVERITIES = frozenset({"CRITICAL", "HIGH"})
 
 
 def individual_severities(floor: str) -> set[str]:
-    """Return the set of severities (>= floor) that get individual issues."""
-    floor = (floor or "").strip().upper()
-    if floor not in _SEVERITY_ORDER:
-        floor = _DEFAULT_INDIVIDUAL_FLOOR
-    idx = _SEVERITY_ORDER.index(floor)
-    return set(_SEVERITY_ORDER[idx:])
+    """The severities that get individual issues. Constant — `floor` is ignored.
+
+    Keeps its parameter deliberately: every caller-supplied value still arrives through
+    this door, so the tests that pin the clamp exercise the real entry point rather than
+    asserting on a module constant.
+    """
+    del floor  # inert — see the block comment above
+    return set(_INDIVIDUAL_SEVERITIES)
+
+
+def severity_floor_note(floor: str) -> str | None:
+    """A warning for a caller whose `severity_floor` is no longer honoured, else None.
+
+    Silent for empty/whitespace (15 callers pass nothing; rolliq-com/devops passes an empty
+    string) and for HIGH, which is what the value already meant. Loud for LOW, MEDIUM,
+    CRITICAL — and for a typo, which was silent before #1357 even though the sibling
+    weekly-security-scan-reusable.yml warns for the identical class of mistake.
+
+    The value is caller-authored YAML rather than model output, but it reaches a job-summary
+    markdown block, so it is collapsed to one line, length-capped and repr-quoted before it
+    goes anywhere. It is deliberately NOT put in the receipt table, which renders unescaped
+    pipes and takes bounded constants only — see new_receipt().
+    """
+    raw = (floor or "").strip()
+    if not raw or raw.upper() == _DEFAULT_INDIVIDUAL_FLOOR:
+        return None
+    shown = re.sub(r"\s+", " ", raw)[:32]
+    return (
+        f"severity_floor={shown!r} is not honoured. CRITICAL/HIGH are always filed as "
+        "individual issues and MEDIUM/LOW always roll into the digest. Remove the "
+        "`severity_floor:` line from the caller workflow."
+    )
 
 # Fixed title = the find-or-update key for the rolling digest (matched exactly,
 # the same way weekly-security-scan matches its aggregate issue by title).
@@ -1841,7 +1892,16 @@ DIGEST_TITLE = "[Security][adversarial-ai] MEDIUM/LOW findings digest"
 # Recover the location cell from an existing digest table row, for append-dedup.
 # Locations are sanitised (backticks/pipes escaped) before they reach a row, so
 # the only backticks on the line are the wrappers this module adds.
-_DIGEST_ROW_RE = re.compile(r'(?m)^\|\s*(?:MEDIUM|LOW)\s*\|\s*`([^`]+)`\s*\|')
+#
+# Derived from _SEVERITY_ORDER rather than spelled "MEDIUM|LOW", because digest_row()
+# below writes whatever severity it is handed. The two were allowed to disagree: a
+# severity this pattern cannot read back is a location that never enters `seen`, so every
+# subsequent run re-appends the same row and the digest grows without bound. The clamp
+# above makes that unreachable today — which is exactly why the coupling needs to be
+# structural rather than a comment nobody will re-check.
+_DIGEST_ROW_RE = re.compile(
+    r'(?m)^\|\s*(?:' + "|".join(_SEVERITY_ORDER) + r')\s*\|\s*`([^`]+)`\s*\|'
+)
 
 
 def digest_row(finding: dict) -> str:
@@ -1991,7 +2051,9 @@ def main() -> None:
     before = os.environ.get("BEFORE_SHA", "")
     after = os.environ.get("AFTER_SHA", "")
     run_url = os.environ.get("RUN_URL", "")
-    individual_floor = individual_severities(os.environ.get("INDIVIDUAL_SEVERITY_FLOOR", ""))
+    raw_floor = os.environ.get("INDIVIDUAL_SEVERITY_FLOOR", "")
+    individual_floor = individual_severities(raw_floor)
+    floor_note = severity_floor_note(raw_floor)
     board_token = os.environ.get("BOARD_APP_TOKEN", "")
     board_owner = repo.split("/", 1)[0] if repo else ""
 
@@ -2004,6 +2066,19 @@ def main() -> None:
         sys.exit(1)
 
     receipt = new_receipt()
+
+    # Emitted here, ahead of every early return below: a caller whose `severity_floor` is
+    # dead must learn that on its next merge even if that merge is a branch creation or an
+    # empty diff. Each early return still renders the receipt via _exit_with(), so the
+    # scope row lands too. Deliberately NOT appended to `ingest_notes` — that list renders
+    # under a "PR-time reviewer findings not fully ingested" heading and would file this
+    # under the wrong fault.
+    if floor_note:
+        print(f"WARNING: {floor_note}", file=sys.stderr)
+        _step_summary(
+            "### ⚠️ `severity_floor` is no longer honoured\n\n" + floor_note + "\n"
+        )
+        receipt["individual_scope"] = "CRITICAL+HIGH (severity_floor ignored)"
 
     # All-zero before SHA = branch creation — no prior commit to diff against.
     if before and set(before) == {"0"}:
