@@ -179,6 +179,49 @@ def run_degraded_from_env() -> bool:
     return True
 
 
+# Recognised spellings of the `dashboard-issue` action input. Only these three
+# disable dashboard CREATION; everything else — including a mis-set or unexpanded
+# expression — leaves it enabled. See dashboard_creation_enabled().
+_DASHBOARD_DISABLED_VALUES = {"false", "0", "no"}
+_DASHBOARD_ENABLED_VALUES = {"", "true", "1", "yes"}
+
+
+def dashboard_creation_enabled() -> bool:
+    """Whether this run may CREATE the Security Status dashboard issue.
+
+    The dashboard is found-or-created by title, and nothing else can suppress that
+    create: the auto-close pass skips SECURITY_STATUS_TITLE by name, and the issue
+    carries `security-status` rather than `security`, so it is outside the set
+    fetch_open_security_issues() returns. A repo that closes its dashboard on
+    purpose therefore gets a fresh one, under a new number, on the very next run
+    (lead-relay #229, rolliq-com rrc#1661/#1662).
+
+    False means UPDATE-ONLY, not "do nothing": an existing open dashboard is still
+    refreshed. The flag governs creation alone, so reopening the issue resumes
+    normal updates without anyone having to edit a workflow.
+
+    Fail-safe parse — and note the direction is the OPPOSITE of
+    run_degraded_from_env() directly above. There an unparseable value must mean
+    "degraded"; here it must mean "create". Defaulting an unrecognised value to
+    "suppressed" would let one typo — or an unexpanded `inputs.` expression that
+    arrived as a literal — silently switch off a repo's only rolled-up security
+    surface, with nothing downstream reporting its absence. Same fail-safe
+    direction, and the same reasoning, as resolve_severity_floor() defaulting to
+    LOW rather than to a floor that hides findings.
+    """
+    raw = os.environ.get("DASHBOARD_ISSUE", "").strip().lower()
+    if raw in _DASHBOARD_DISABLED_VALUES:
+        return False
+    if raw not in _DASHBOARD_ENABLED_VALUES:
+        print(
+            f"  WARNING: DASHBOARD_ISSUE={raw!r} is not a recognised boolean "
+            f"(expected one of true/false/1/0/yes/no); leaving dashboard creation "
+            f"ENABLED rather than suppressing the dashboard on a misconfiguration.",
+            file=sys.stderr,
+        )
+    return True
+
+
 # ── Sanitisation ───────────────────────────────────────────────────────────────
 
 _UNICODE_LINE_SEPS = frozenset((0x2028, 0x2029))
@@ -1267,6 +1310,49 @@ def update_issue_body(token: str, repo: str, issue_number: int, body: str) -> No
         ).raise_for_status()
 
 
+def upsert_status_dashboard(
+    token: str, repo: str, status_body: str, *, allow_create: bool
+) -> None:
+    """Write the Security Status dashboard: update the open one, or create it.
+
+    Shared by both modes that write a dashboard — `create-issues` (as the tail of
+    a full scan) and `update-dashboard` (standalone refresh). The two carried
+    byte-identical copies of this block, which is how `allow_create` could have
+    been honoured in one and not the other.
+
+    `allow_create=False` makes this update-only: an existing open dashboard is
+    still refreshed, but a missing one is NOT re-created, so a repo that closed
+    its dashboard deliberately keeps it closed. See dashboard_creation_enabled().
+    """
+    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
+        resp = client.get(
+            f"{GITHUB_API}/repos/{repo}/issues",
+            headers=_gh_headers(token),
+            params={"labels": SECURITY_STATUS_LABEL, "state": "open", "per_page": 10},
+        )
+        resp.raise_for_status()
+        dashboard_issues = resp.json()
+
+    dashboard = next(
+        (i for i in dashboard_issues if i["title"] == SECURITY_STATUS_TITLE), None)
+
+    if dashboard:
+        print(f"  Updating dashboard issue #{dashboard['number']}")
+        update_issue_body(token, repo, dashboard["number"], status_body)
+    elif allow_create:
+        print("  Creating dashboard issue")
+        create_issue(token, repo, SECURITY_STATUS_TITLE, status_body, [SECURITY_STATUS_LABEL])
+    else:
+        # Say so. A silent skip here is indistinguishable from the dashboard step
+        # having failed, and the whole point of this branch is that the absence of
+        # the issue is intentional rather than a fault.
+        print(
+            "  No open dashboard issue, and dashboard-issue is false — not creating "
+            "one. Re-open the existing issue (or set dashboard-issue: true) to "
+            "resume dashboard updates."
+        )
+
+
 # ── Issue body builders ────────────────────────────────────────────────────────
 
 def build_finding_body(finding: dict, run_url: str) -> str:
@@ -1899,24 +1985,10 @@ def run_create_issues() -> None:
         run_degraded=degraded,
     )
 
-    # Find or create the dashboard issue (labelled security-status, not security)
-    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
-        resp = client.get(
-            f"{GITHUB_API}/repos/{repo}/issues",
-            headers=_gh_headers(token),
-            params={"labels": "security-status", "state": "open", "per_page": 10},
-        )
-        resp.raise_for_status()
-        dashboard_issues = resp.json()
-
-    dashboard = next((i for i in dashboard_issues if i["title"] == SECURITY_STATUS_TITLE), None)
-
-    if dashboard:
-        print(f"  Updating dashboard issue #{dashboard['number']}")
-        update_issue_body(token, repo, dashboard["number"], status_body)
-    else:
-        print("  Creating dashboard issue")
-        create_issue(token, repo, SECURITY_STATUS_TITLE, status_body, [SECURITY_STATUS_LABEL])
+    # Find or update the dashboard issue (labelled security-status, not security).
+    # Creation is caller-gated: see dashboard_creation_enabled().
+    upsert_status_dashboard(
+        token, repo, status_body, allow_create=dashboard_creation_enabled())
 
     print("Done.")
 
@@ -1961,23 +2033,8 @@ def run_update_dashboard() -> None:
         run_degraded=run_degraded_from_env(),
     )
 
-    with httpx.Client(timeout=_GITHUB_TIMEOUT) as client:
-        resp = client.get(
-            f"{GITHUB_API}/repos/{repo}/issues",
-            headers=_gh_headers(token),
-            params={"labels": "security-status", "state": "open", "per_page": 10},
-        )
-        resp.raise_for_status()
-        dashboard_issues = resp.json()
-
-    dashboard = next((i for i in dashboard_issues if i["title"] == SECURITY_STATUS_TITLE), None)
-
-    if dashboard:
-        print(f"  Updating dashboard issue #{dashboard['number']}")
-        update_issue_body(token, repo, dashboard["number"], status_body)
-    else:
-        print("  Creating dashboard issue")
-        create_issue(token, repo, SECURITY_STATUS_TITLE, status_body, [SECURITY_STATUS_LABEL])
+    upsert_status_dashboard(
+        token, repo, status_body, allow_create=dashboard_creation_enabled())
 
     print("Done.")
 

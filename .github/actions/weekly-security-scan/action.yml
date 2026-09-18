@@ -72,6 +72,21 @@ inputs:
       unrecognised value is treated as degraded rather than assumed clean.
     required: false
     default: ""
+  dashboard-issue:
+    description: >-
+      Whether this run may CREATE the Security Status dashboard issue
+      (create-issues / update-dashboard). Default true = historical behaviour.
+      Set false to make both dashboard-writing paths UPDATE-ONLY: an open
+      dashboard is still refreshed every run, but a missing one is not
+      re-created. Without this the dashboard is found-or-created by title with no
+      way to opt out, so a repo that closes it deliberately gets a fresh one under
+      a new number on the next run — nothing else suppresses that create, because
+      the auto-close pass skips the dashboard title by name and the issue carries
+      the security-status label rather than security. Re-open the issue to resume
+      updates. Unrecognised values leave creation ENABLED: a typo must not be able
+      to silently switch off a repo's only rolled-up security surface.
+    required: false
+    default: "true"
 
   # ── create-issues mode — findings artifact paths ────────────────────────────
   semgrep-findings:
@@ -142,6 +157,7 @@ runs:
         RUN_URL: ${{ inputs.run-url }}
         SEVERITY_FLOOR: ${{ inputs.severity-floor }}
         RUN_DEGRADED: ${{ inputs.run-degraded }}
+        DASHBOARD_ISSUE: ${{ inputs.dashboard-issue }}
         # create-issues — findings artifact paths
         SEMGREP_FINDINGS: ${{ inputs.semgrep-findings }}
         TRIVY_FS_FINDINGS: ${{ inputs.trivy-fs-findings }}

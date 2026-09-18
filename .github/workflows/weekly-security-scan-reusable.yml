@@ -79,6 +79,19 @@ on:
         type: string
         required: false
         default: ""
+      dashboard_issue:
+        description: >-
+          Whether this workflow may CREATE the Security Status dashboard issue.
+          Default true = historical behaviour. Set false to make the dashboard
+          write UPDATE-ONLY: an open dashboard is still refreshed every run, but a
+          closed one is not re-created under a new number. Re-open the issue to
+          resume updates. NOTE for repos that also run a second dashboard writer
+          (e.g. an azure-secure-score job calling the composite action directly):
+          that caller has its own `dashboard-issue` input and must be set too, or
+          it re-creates what this one declines to.
+        type: boolean
+        required: false
+        default: true
     secrets:
       # infra_repo and secrets_repo each have two ways to authenticate their
       # checkout, and the corresponding cred-selection step fails closed unless
@@ -644,6 +657,7 @@ jobs:
           repo: ${{ github.repository }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           severity-floor: ${{ inputs.severity_floor }}
+          dashboard-issue: ${{ inputs.dashboard_issue }}
           # This job runs under `if: always()` so partial results are persisted —
           # which also means it writes a dashboard on runs where every scanner
           # above it failed. Tell the renderer, or that dashboard is byte-identical
