@@ -28,7 +28,7 @@ fails open on the first such PR and blocks afterwards, so the first change is
 not held up and the tenth is not merged unreviewed.
 
 Required env vars:
-  PROVIDER         anthropic | openai
+  PROVIDER         anthropic | openai | openrouter
   REVIEW_API_KEY   API key for the chosen provider
   GITHUB_TOKEN     GitHub token with pull-requests:write
   PR_NUMBER        Pull request number
@@ -89,7 +89,41 @@ PROVIDERS = {
         # (git-credential-helper token exfiltration path — see the PR body).
         "blocking_scope": "always",
     },
+    "openrouter": {
+        # The SECOND-OPINION SLOT, filled by a different vendor. Selected per caller via the
+        # reusable workflow's `second-opinion-provider:` input; nothing resolves it by default,
+        # so adding this entry changes no caller's behaviour on its own.
+        #
+        # THE DATED SNAPSHOT IS THE HONEST SPELLING HERE, and this is the opposite of the
+        # `openai` entry above for a measured reason rather than an inconsistency. Measured
+        # live on OpenRouter 2026-09-21: the BARE id `deepseek/deepseek-v4-pro` resolves to
+        # "DeepSeek V4 Pro 0423" — a frozen April snapshot wearing a floating-looking name —
+        # and there is no `~deepseek/deepseek-v4-pro-latest` in the catalog at all. So the
+        # fleet's usual bare-alias-means-floating convention (infra-commons/meta
+        # model-registry.yaml) does NOT hold for this vendor, and a pin written by that
+        # convention would silently freeze on April while reading as current. `-0813` is the
+        # newer snapshot, says what it is, and is cheaper on input — which is the side that
+        # dominates here, since a review sends up to MAX_DIFF_CHARS in and gets ~4k back.
+        #
+        # PRICE, MEASURED 2026-09-21 AND ONLY THEN: $0.66 / $1.98 per M tokens in/out, against
+        # gpt-5.6-terra's $2 / $12 — 3.0x cheaper in, 6.1x cheaper out. Re-measure before
+        # quoting: the bare `-pro` id moved 2.11x in the 24 hours before this was written.
+        "model": "deepseek/deepseek-v4-pro-0813",
+        "label": "DeepSeek",
+        # Its own marker, so its comments dedupe against themselves and stay visually distinct
+        # from the OpenAI leg's on a PR that has seen both.
+        "marker": "<!-- adversarial-review-openrouter-bot -->",
+        # Same scope as the slot it replaces. The point of this leg is to measure SEVERITY
+        # DIVERGENCE against Claude on the same diff, and a leg scoped differently from the one
+        # it is being compared with would make that comparison meaningless.
+        "blocking_scope": "always",
+    },
 }
+
+# OpenRouter speaks the OpenAI wire format only — there is no Anthropic-Messages endpoint — so
+# this is a `base_url` on the OpenAI SDK. Same constant and same value as the fleet's other
+# OpenRouter leg, infra-commons/meta `scripts/obsidian-tidy.py`.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 GITHUB_API = "https://api.github.com"
 
@@ -573,11 +607,71 @@ def call_openai(api_key: str, model: str, diff: str, context: str, system_prompt
     return content
 
 
+def call_openrouter(api_key: str, model: str, diff: str, context: str, system_prompt: str) -> str:
+    """The OpenAI wire format, pointed at OpenRouter. A SEPARATE LEG, NOT A `base_url` ARGUMENT
+    TO `call_openai()`, and the difference is load-bearing rather than stylistic.
+
+    `max_tokens`, NOT `max_completion_tokens`. OpenRouter normalizes `max_tokens` across every
+    model it fronts; the `max_completion_tokens` rename that `call_openai()` above carries is an
+    OpenAI-direct reasoning-model concern. This is not a guess — infra-commons/meta
+    `scripts/obsidian-tidy.py` settled it for the fleet's other OpenRouter leg and says in place
+    "do not 'fix' this to match the other SDK". It also matters concretely for the pinned model:
+    `deepseek/deepseek-v4-pro-0813` advertises `max_tokens` and does NOT advertise
+    `max_completion_tokens` (measured in the live catalog 2026-09-21), so a copied
+    `call_openai()` would send a parameter this model does not declare support for.
+
+    Everything else is deliberately identical to `call_openai()`, above all the two guards at the
+    bottom. An empty or truncated completion must raise rather than return, because a reviewer
+    that returned nothing is indistinguishable from a reviewer that found nothing — a silent
+    fail-open, and the exact failure this gate exists to not have. A second leg is precisely
+    where that discipline gets dropped by accident, so it is restated rather than shared.
+    """
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=16384,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": _build_user_content(diff, context)},
+        ],
+    )
+    # `usage` can be absent on some OpenRouter routes, so every read defaults rather than
+    # assumes: an under-reported token count is survivable, an AttributeError mid-review is not.
+    usage = getattr(response, "usage", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    print(
+        "usage: input={} output={} reasoning={}".format(
+            getattr(usage, "prompt_tokens", 0) or 0,
+            getattr(usage, "completion_tokens", 0) or 0,
+            getattr(details, "reasoning_tokens", 0) or 0,
+        ),
+        flush=True,
+    )
+    choice = response.choices[0]
+    content = choice.message.content
+
+    if not content or not content.strip():
+        raise RuntimeError(
+            f"{model} returned an empty completion (finish_reason="
+            f"{choice.finish_reason!r}) — review did not run; not treating as clean."
+        )
+    if choice.finish_reason == "length":
+        raise RuntimeError(
+            f"{model} hit the token budget before finishing the review "
+            "(finish_reason='length') — findings may be truncated; not treating as clean."
+        )
+    return content
+
+
 def run_review(provider: str, api_key: str, model: str, diff: str, context: str, system_prompt: str) -> str:
     if provider == "anthropic":
         return call_anthropic(api_key, model, diff, context, system_prompt)
     if provider == "openai":
         return call_openai(api_key, model, diff, context, system_prompt)
+    if provider == "openrouter":
+        return call_openrouter(api_key, model, diff, context, system_prompt)
     raise ValueError(f"Unknown provider: {provider!r}")
 
 
@@ -1295,7 +1389,7 @@ def _is_quota_error(provider: str, exc: Exception) -> bool:
         if provider == "anthropic":
             import anthropic as _ant
             return isinstance(exc, _ant.APIStatusError)
-        if provider == "openai":
+        if provider in ("openai", "openrouter"):
             import openai as _oai
             return isinstance(exc, _oai.APIStatusError)
     except ImportError:  # pragma: no cover — the SDK is installed by action.yml
@@ -1317,7 +1411,16 @@ def _is_infra_error(provider: str, exc: Exception) -> bool:
             return True
         if isinstance(exc, _ant.APIStatusError) and exc.status_code >= 500:
             return True
-    elif provider == "openai":
+    elif provider in ("openai", "openrouter"):
+        # OpenRouter is reached through the OpenAI SDK, so it raises the same exception types.
+        #
+        # NOTE WHAT THIS DOES NOT COVER, rather than leaving it to be found later: OpenRouter
+        # signals exhausted credit with HTTP 402, and its wording is not among `_QUOTA_MARKERS`
+        # (which is deliberately a list of exact vendor phrases — see the comment above it). A
+        # 402 is neither a RateLimitError nor >= 500, so it does not match here either. It
+        # therefore propagates and hard-fails the job, which is the LOUD direction and the safe
+        # one: the gate sees a reviewer that did not complete, rather than a PR merged
+        # unreviewed and green. Add a marker only once a real 402 body has been observed.
         import openai as _oai
         if isinstance(exc, (_oai.RateLimitError, _oai.APIConnectionError, _oai.APITimeoutError)):
             return True

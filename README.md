@@ -9,7 +9,11 @@ Canonical security workflows shared across all entity orgs (rolliq-com, cashbuck
 Runs an adversarial AI security review on every PR diff. Supports two independent model families:
 
 - **Claude** (Anthropic, `claude-sonnet-5`) — always runs.
-- **OpenAI** (`gpt-5.6-terra`) — optional; enabled per-caller with `run-openai: true`. Requires `OPENAI_API_KEY` org secret.
+- **A second opinion** — optional; enabled per-caller with `run-openai: true`, and the provider that fills the slot is chosen with `second-opinion-provider`:
+  - `openai` (default) — `gpt-5.6-terra` on OpenAI's direct API. Requires `OPENAI_API_KEY`.
+  - `openrouter` — `deepseek/deepseek-v4-pro-0813` via OpenRouter. Requires `OPENROUTER_API_KEY`.
+
+  The model, endpoint, comment marker and blocking scope for each live in `adversarial-review.py`'s `PROVIDERS`; a caller selects a provider by name and supplies nothing else.
 
 The gate job blocks merge if either enabled reviewer finds a CRITICAL finding and opens a tracking issue in the caller's repo.
 
@@ -17,19 +21,21 @@ The gate job blocks merge if either enabled reviewer finds a CRITICAL finding an
 
 | Input | Type | Default | Description |
 |---|---|---|---|
-| `run-openai` | boolean | `false` | Also run the OpenAI reviewer alongside Claude. |
+| `run-openai` | boolean | `false` | Also run the second-opinion reviewer alongside Claude. |
+| `second-opinion-provider` | string | `openai` | Which provider fills that slot — `openai` or `openrouter`. |
 
 **Secrets** (pass via `secrets: inherit` or explicitly):
 
 | Secret | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes (for Claude job) | Org secret. Not available in Dependabot/fork contexts — Claude skips automatically. |
-| `OPENAI_API_KEY` | Only when `run-openai: true` | Org secret. Must be set with `visibility: private` (same trust boundary as `ANTHROPIC_API_KEY`). |
+| `OPENAI_API_KEY` | Only when `run-openai: true` and `second-opinion-provider: openai` | Must be set with `visibility: private` (same trust boundary as `ANTHROPIC_API_KEY`). |
+| `OPENROUTER_API_KEY` | Only when `second-opinion-provider: openrouter` | Same trust boundary. **Scope it to the CALLING repo, not to `infra-commons/security`** — a reusable workflow resolves `secrets:` in the caller's context, so a key scoped to the repo that holds this code is never read by anything. |
 
 **Resulting checks:**
 
 - `<caller-job-name> / claude` — Claude adversarial review
-- `<caller-job-name> / openai` — OpenAI adversarial review (only when `run-openai: true`)
+- `<caller-job-name> / openai` — the second-opinion adversarial review (only when `run-openai: true`). The job keeps the name `openai` whichever provider fills it: it is the slot's name, the gate consumes it as `openai-result`/`openai-outcome`, and renaming it would change the check context every caller reports under.
 - `<caller-job-name> / gate` — **set this as the required branch-protection status check**
 
 **Draft gate:** Callers must exclude draft PRs via their `on.pull_request.types` trigger (include `ready_for_review`) and an `if: !github.event.pull_request.draft` guard on the job. The reusable skips Dependabot and fork PRs automatically (no secret access).
@@ -45,16 +51,17 @@ adversarial-review:
   uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@52ee5a8afff43bf86cefd2f2c330373ccdda3f5e
   with:
     run-openai: true   # omit or set false to run Claude only
+    # second-opinion-provider: openrouter   # omit for the openai default
   secrets: inherit
 ```
 
 > **SHA pin:** Always pin to a full commit SHA, not `@main`. The required status check `pin-check` on `infra-commons/security` rejects any PR that references a mutable ref inside this repo.
 
-#### Adopting the OpenAI reviewer in a new org
+#### Adopting the second-opinion reviewer in a new org
 
-1. Set an `OPENAI_API_KEY` org secret with `visibility: private` in the org (same pattern as `ANTHROPIC_API_KEY`).
-2. Add `run-openai: true` to the caller job's `with:` block.
-3. Make sure `OPENAI_API_KEY` flows through `secrets: inherit` (or is forwarded explicitly in any intermediate shim).
+1. Set the provider's key (`OPENAI_API_KEY`, or `OPENROUTER_API_KEY` for `second-opinion-provider: openrouter`) with `visibility: private`, **scoped to the repos that CALL this reusable**.
+2. Add `run-openai: true` to the caller job's `with:` block, plus `second-opinion-provider:` if not using the default.
+3. Make sure that key flows through `secrets: inherit` (or is forwarded explicitly in any intermediate shim).
 4. Add `<caller-job-name> / gate` as a required branch-protection status check (this single check gates both reviewers).
 
 Cross-org rollout and secret provisioning are out of scope for this reusable — they are a manual per-org step.

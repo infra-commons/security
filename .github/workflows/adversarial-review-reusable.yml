@@ -117,14 +117,32 @@ on:
   workflow_call:
     inputs:
       run-openai:
-        description: "Also run the OpenAI reviewer (needs OPENAI_API_KEY)."
+        description: >-
+          Also run the second-opinion reviewer. Named for the provider that has always filled
+          that slot; `second-opinion-provider` now chooses which one does. Kept under this name
+          rather than renamed because every caller passes it and the gate reports on it.
         type: boolean
         required: false
         default: false
+      second-opinion-provider:
+        description: >-
+          Which provider fills the second-opinion slot — `openai` (gpt-5.6-terra, direct API,
+          needs OPENAI_API_KEY) or `openrouter` (DeepSeek V4 Pro, needs OPENROUTER_API_KEY).
+          Defaults to `openai`, so a caller that does not set it resolves exactly what it
+          resolves today. The model, endpoint and blocking scope for each live in
+          `adversarial-review.py`'s PROVIDERS, not here.
+        type: string
+        required: false
+        default: openai
     secrets:
       ANTHROPIC_API_KEY:
         required: false   # not available in Dependabot/fork contexts; claude job skips itself
       OPENAI_API_KEY:
+        required: false
+      OPENROUTER_API_KEY:
+        # Resolved in the CALLER's context like the two above, so it must exist on the calling
+        # repo — not on this one. Optional for the same reason they are: a caller that has not
+        # selected `openrouter` never reads it.
         required: false
 
 jobs:
@@ -156,7 +174,13 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha }}
           head-sha: ${{ github.event.pull_request.head.sha }}
 
-  # ── OpenAI reviewer (optional second perspective) ──────────────────────────
+  # ── Second-opinion reviewer (optional cross-vendor perspective) ────────────
+  #
+  # THE JOB NAME STAYS `openai`, deliberately, now that the provider filling it is selectable.
+  # It is the SLOT's name, and the gate consumes it as one (`openai-result`/`openai-outcome`).
+  # Renaming it would change the check context every caller reports under — including
+  # rolliq-com/solution-recruitment-reference-check, the one repo fleet-wide where
+  # `adversarial-review / gate` is a REQUIRED check, whose ruleset names the old context.
   openai:
     name: openai
     runs-on: ubuntu-latest
@@ -175,8 +199,23 @@ jobs:
       - id: review
         uses: infra-commons/security/.github/actions/adversarial-review@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # adversarial-review/v1.16.0
         with:
-          provider: openai
-          api-key: ${{ secrets.OPENAI_API_KEY }}
+          provider: ${{ inputs.second-opinion-provider }}
+          # THE SECOND ARM IS A FULL CONDITION, NOT A BARE FALLBACK, and that is the whole
+          # point of writing it this way. GitHub's `&&`/`||` return the OPERAND, not a boolean,
+          # and an unset secret is the empty string — which is falsy. So the obvious spelling,
+          # `provider == 'openrouter' && secrets.OPENROUTER_API_KEY || secrets.OPENAI_API_KEY`,
+          # falls through and hands the OPENAI key to OpenRouter whenever OPENROUTER_API_KEY is
+          # missing: a wrong-credential call that reads as an ordinary auth failure, with
+          # nothing anywhere saying which key was actually sent.
+          #
+          # Written as two guarded arms, a missing selected secret yields the empty string
+          # instead, and `adversarial-review.py`'s own `missing env vars` check exits 1 — which
+          # the gate reads as a reviewer that did not complete. Loud, and about the right thing.
+          api-key: ${{ (inputs.second-opinion-provider == 'openrouter'
+                          && secrets.OPENROUTER_API_KEY)
+                       || (inputs.second-opinion-provider == 'openai'
+                          && secrets.OPENAI_API_KEY)
+                       || '' }}
           github-token: ${{ github.token }}
           pr-number: ${{ github.event.pull_request.number }}
           repo: ${{ github.repository }}

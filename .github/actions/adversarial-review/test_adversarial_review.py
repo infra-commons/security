@@ -196,6 +196,168 @@ def test_truncation_error_is_not_an_infra_error():
     assert adv._is_infra_error("openai", RuntimeError("token budget")) is False
 
 
+# ── OpenRouter completion guards ───────────────────────────────────────────────
+#
+# A SEPARATE FAKE, not a reuse of `_fake_openai` above, for the reason these tests exist to
+# pin: this leg constructs the client with a `base_url`. The fake above accepts `api_key`
+# only, so reusing it would TypeError rather than assert — and the endpoint is the one thing
+# about this leg that must not silently change.
+
+_NO_USAGE = object()   # distinct from None, which the SDK itself can legitimately return
+
+
+def _fake_openrouter(monkeypatch, *, content, finish_reason="stop", usage=None):
+    """`usage=_NO_USAGE` builds a response object with no `usage` attribute at all — the shape
+    some OpenRouter routes actually return, and the one a `response.usage` read would
+    AttributeError on."""
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=content), finish_reason=finish_reason
+    )
+    if usage is None:
+        usage = SimpleNamespace(prompt_tokens=11, completion_tokens=22)
+    if usage is _NO_USAGE:
+        response = SimpleNamespace(choices=[choice])
+    else:
+        response = SimpleNamespace(choices=[choice], usage=usage)
+
+    class _Completions:
+        def create(self, **kwargs):
+            _Completions.kwargs = kwargs
+            return response
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        def __init__(self, api_key=None, base_url=None):
+            _Client.init_kwargs = {"api_key": api_key, "base_url": base_url}
+            self.chat = _Chat()
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _Client)
+    return _Completions, _Client
+
+
+def test_openrouter_returns_content_on_success(monkeypatch):
+    _fake_openrouter(monkeypatch, content="### CRITICAL\n- something")
+    out = adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+    assert "CRITICAL" in out
+
+
+def test_openrouter_targets_the_openrouter_base_url(monkeypatch):
+    # Without the base_url this is a direct OpenAI call carrying an OpenRouter key, against a
+    # model OpenAI does not serve — so it fails, but only at runtime and only in CI.
+    _, client = _fake_openrouter(monkeypatch, content="ok")
+    adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+    assert client.init_kwargs["base_url"] == adv.OPENROUTER_BASE_URL
+    assert client.init_kwargs["base_url"] == "https://openrouter.ai/api/v1"
+
+
+def test_openrouter_uses_max_tokens_not_max_completion_tokens(monkeypatch):
+    # The exact inverse of `test_openai_uses_max_completion_tokens_not_max_tokens`, and the
+    # reason this is a separate function rather than a `base_url` argument to `call_openai`.
+    # OpenRouter normalizes `max_tokens`; the pinned model
+    # (`deepseek/deepseek-v4-pro-0813`) does not advertise `max_completion_tokens` at all.
+    completions, _ = _fake_openrouter(monkeypatch, content="ok")
+    adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+    assert "max_tokens" in completions.kwargs
+    assert "max_completion_tokens" not in completions.kwargs
+
+
+def test_openrouter_sends_the_system_prompt_as_a_message(monkeypatch):
+    # There is no top-level `system=` in the OpenAI wire format. A leg that dropped the
+    # system prompt would still return plausible JSON, so the bug would present as a quality
+    # regression and be blamed on the model rather than on the transport — which is exactly
+    # what a canary must never be allowed to misattribute.
+    completions, _ = _fake_openrouter(monkeypatch, content="ok")
+    adv.call_openrouter("k", "m", "diff", "ctx", "sys-prompt")
+    roles = [m["role"] for m in completions.kwargs["messages"]]
+    assert roles == ["system", "user"]
+    assert completions.kwargs["messages"][0]["content"] == "sys-prompt"
+
+
+def test_openrouter_prints_usage_line(monkeypatch, capsys):
+    _fake_openrouter(monkeypatch, content="ok")
+    adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+    assert "usage: input=11 output=22 reasoning=0" in capsys.readouterr().out
+
+
+def test_openrouter_tolerates_a_missing_usage_block(monkeypatch, capsys):
+    # `usage` can be absent on some OpenRouter routes. The cost line under-reports; the review
+    # still returns. An AttributeError here would fail the job on a review that succeeded —
+    # and the gate reads a failed job as a reviewer that did not complete.
+    _fake_openrouter(monkeypatch, content="### CRITICAL\n- found", usage=_NO_USAGE)
+    out = adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+    assert "CRITICAL" in out
+    assert "usage: input=0 output=0 reasoning=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("content", ["", "   \n  ", None])
+def test_openrouter_empty_completion_raises_rather_than_reading_as_clean(monkeypatch, content):
+    # Same silent fail-open the OpenAI leg guards against: nothing returned is
+    # indistinguishable from nothing found.
+    _fake_openrouter(monkeypatch, content=content)
+    with pytest.raises(RuntimeError, match="empty completion"):
+        adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+
+
+def test_openrouter_truncated_completion_raises(monkeypatch):
+    _fake_openrouter(monkeypatch, content="### CRITICAL\n- partial", finish_reason="length")
+    with pytest.raises(RuntimeError, match="token budget"):
+        adv.call_openrouter("k", "m", "diff", "ctx", "sys")
+
+
+def test_openrouter_truncation_error_is_not_an_infra_error():
+    assert adv._is_infra_error("openrouter", RuntimeError("token budget")) is False
+
+
+def test_openrouter_quota_and_infra_errors_use_the_openai_exception_family():
+    # OpenRouter is reached through the OpenAI SDK, so it raises OpenAI's types. Before this
+    # change both classifiers keyed on `provider == "openai"` exactly, and an OpenRouter
+    # rate limit would have fallen through to "not infra" — hard-failing the job on a
+    # transient error instead of failing open.
+    import openai as _oai
+
+    rate_limited = _oai.RateLimitError.__new__(_oai.RateLimitError)
+    Exception.__init__(rate_limited, "rate limited")
+    assert adv._is_infra_error("openrouter", rate_limited) is True
+
+    # And a plain RuntimeError carrying a quota phrase is still not a billing signal.
+    assert adv._is_quota_error(
+        "openrouter", RuntimeError("insufficient_quota")) is False
+
+
+def test_run_review_dispatches_openrouter(monkeypatch):
+    seen = {}
+
+    def _fake(*args):
+        seen["args"] = args
+        return "reviewed"
+
+    monkeypatch.setattr(adv, "call_openrouter", _fake)
+    assert adv.run_review("openrouter", "k", "m", "d", "c", "s") == "reviewed"
+    assert seen["args"] == ("k", "m", "d", "c", "s")
+
+
+def test_the_openrouter_pin_is_a_dated_snapshot_not_the_bare_alias():
+    """Measured on OpenRouter 2026-09-21: the bare `deepseek/deepseek-v4-pro` resolves to the
+    frozen "DeepSeek V4 Pro 0423" snapshot, and no `-latest` form is published. So the fleet's
+    bare-alias-means-floating convention does not hold for this vendor, and a well-meaning
+    "tidy up the pin to the alias" edit would silently move this reviewer back to April."""
+    model = adv.PROVIDERS["openrouter"]["model"]
+    assert model == "deepseek/deepseek-v4-pro-0813"
+    assert model != "deepseek/deepseek-v4-pro"
+
+
+def test_every_provider_has_its_own_comment_marker():
+    """Two legs sharing a marker would dedupe onto each other's comment, so the second
+    reviewer to post would overwrite the first and the divergence this canary exists to
+    measure would be invisible on the PR."""
+    markers = [cfg["marker"] for cfg in adv.PROVIDERS.values()]
+    assert len(markers) == len(set(markers))
+
+
 # ── Anthropic completion guards ─────────────────────────────────────────────────
 #
 # Mirrors the OpenAI section above. security#109 added call_anthropic's guard
