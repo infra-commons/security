@@ -5,7 +5,13 @@ description: >-
 
 inputs:
   provider:
-    description: "LLM provider — anthropic | openai"
+    description: >-
+      LLM provider — anthropic | openai | openrouter. Each names a complete, repo-side
+      configuration (endpoint, model, comment marker, blocking scope) in
+      `adversarial-review.py`'s PROVIDERS; a caller selects one by name and supplies nothing
+      else. Deliberately not a model or a base URL input: this action runs with a provider API
+      key and pull-requests:write, and a caller-supplied endpoint would be somewhere to send
+      both.
     required: false
     default: anthropic
   api-key:
