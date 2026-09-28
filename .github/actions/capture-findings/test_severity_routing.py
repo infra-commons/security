@@ -128,7 +128,7 @@ def harness(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "ingest_pr_review_findings", lambda *a: ([], []))
     monkeypatch.setattr(capture.time, "sleep", lambda s: None)
 
-    def fake_digest(token, repo, open_issues, suppressed, findings, run_url):
+    def fake_digest(token, repo, open_issues, suppressed, findings, run_url, **_board):
         digested.append(list(findings))
         return (0, len(findings))
 

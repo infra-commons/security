@@ -50,7 +50,7 @@ def harness(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "ensure_labels", lambda t, r: None)
     monkeypatch.setattr(capture, "open_security_issues", lambda t, r: {})
     monkeypatch.setattr(capture, "closed_suppressed_keys", lambda t, r: set())
-    monkeypatch.setattr(capture, "upsert_digest", lambda *a: (0, 0))
+    monkeypatch.setattr(capture, "upsert_digest", lambda *a, **k: (0, 0))
     monkeypatch.setattr(capture.time, "sleep", lambda s: None)
 
     def fake_create(token, repo, title, body, labels):

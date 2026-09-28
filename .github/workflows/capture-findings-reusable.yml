@@ -108,9 +108,9 @@ on:
       INFRA_COMMONS_BOT_PRIVATE_KEY:
         description: >-
           Optional. The infra-commons-bot App's private key, forwarded by the caller so a newly
-          filed CRITICAL or HIGH finding can be added to the org's board Inbox
-          (infra-commons/meta#661). Not
-          required — omitted or empty, board-add is skipped and everything else is unaffected.
+          filed issue (CRITICAL/HIGH, or a new MEDIUM/LOW digest) can be added to the org's
+          board Inbox (infra-commons/meta#661, #1656). Not required — omitted or empty, each
+          filed issue is left off the board with a `::warning::`; everything else is unaffected.
         required: false
 
 jobs:
