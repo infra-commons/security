@@ -45,7 +45,8 @@ Optional env vars:
                               composite so a caller that passes one does not hard-fail,
                               and still read here so such a caller gets a warning
                               naming the dead value — see severity_floor_note().
-  BOARD_APP_TOKEN             App installation token. Adds a filed CRITICAL or HIGH
+  BOARD_APP_TOKEN             App installation token. Adds every issue this files
+                              (CRITICAL/HIGH, and a newly created MEDIUM/LOW digest)
                               to the org board, and is the fallback credential for
                               reading PR-time review comments (see the ingest section).
   INGEST_PR_REVIEWS           "false" disables the PR-time review ingest below.
@@ -68,6 +69,10 @@ from pathlib import Path
 
 import httpx
 import yaml  # pyyaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import board_intake  # noqa: E402
+from board_intake import add_to_board, board_issue, report as report_board  # noqa: E402
 
 GITHUB_API = "https://api.github.com"
 SUPPRESSIONS_PATH = Path(".github/adversarial-review-suppressions.yml")
@@ -1637,12 +1642,14 @@ def ingest_pr_review_findings(
 # `BOARD_APP_TOKEN` — a distinct, narrower-scoped credential from `token` above, used for nothing
 # but this section.
 #
-# Every function below returns/degrades rather than raises: a board-add is a nice-to-have on top
-# of a successful capture, never a precondition for one. Absent/wrong-shaped input, a missing
-# field, a GraphQL error — all are just a reason string a caller logs and moves on from.
+# Every board call returns/degrades rather than raises: a board-add rides on top of a successful
+# capture, never a precondition for one. A failure is a `::warning::` (board_intake.report), not
+# a silent skip — an off-board issue is invisible, so its being off-board has to be said.
 
-# CRITICAL and HIGH both get a board-add attempt; MEDIUM/LOW roll into the rolling digest, not
-# individual issues, so there's no single issue to add.
+# Every individual issue this module files is CRITICAL or HIGH (see individual_severities), so
+# this set boards every individual issue. MEDIUM/LOW roll into the digest, and the digest ISSUE is
+# boarded when upsert_digest() creates it (infra-commons/meta#1656) — once, at creation; a row
+# appended to an already-open digest is not a new issue.
 #
 # This set was HIGH-only until now, on the reasoning that "CRITICAL already blocks the merge via
 # the PR-time gate, so a board card adds little on top of that". infra-commons/meta#661 reserved
@@ -1663,122 +1670,8 @@ def ingest_pr_review_findings(
 # (`BOT_SECURITY_FINDING_SEVERITIES`); this set was the fleet's one dissenting copy of that fact.
 BOARD_ADD_SEVERITIES = {"CRITICAL", "HIGH"}
 
-# Mirrors sharedinfra's scripts/projects_topology.py (the control-plane's own copy of the same
-# fact) — kept in sync by hand. Five entries, changes rarely; not worth a cross-repo fetch for.
-OWNER_PROJECT_NUMBER: dict[str, int] = {
-    "infra-commons": 1,
-    "rolliq-com": 5,
-    "cashbucket-com": 1,
-    "klsjapan-com": 1,
-    "chargingblindly-com": 1,
-}
-
-_GRAPHQL_URL = "https://api.github.com/graphql"
-
-_BOARD_FIELDS_Q = """
-query($owner: String!, $number: Int!) {
-  repositoryOwner(login: $owner) {
-    ... on ProjectV2Owner {
-      projectV2(number: $number) {
-        id
-        closed
-        fields(first: 50) {
-          nodes {
-            __typename
-            ... on ProjectV2SingleSelectField { id name options { id name } }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
-_ADD_ITEM_M = """
-mutation($project: ID!, $content: ID!) {
-  addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
-}
-"""
-
-_SET_STATUS_M = """
-mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
-  updateProjectV2ItemFieldValue(input: {
-    projectId: $project, itemId: $item, fieldId: $field,
-    value: { singleSelectOptionId: $option }
-  }) { projectV2Item { id } }
-}
-"""
-
-
-def _board_graphql(token: str, query: str, variables: dict) -> dict | None:
-    """POST one GraphQL query/mutation; return `data`, or None on any failure (logged, never raised)."""
-    try:
-        with httpx.Client(timeout=_TIMEOUT) as client:
-            resp = client.post(
-                _GRAPHQL_URL,
-                headers=_headers(token) | {"Content-Type": "application/json"},
-                json={"query": query, "variables": variables},
-            )
-        payload = resp.json()
-    except Exception as exc:
-        print(f"  board: graphql request failed: {exc}", file=sys.stderr)
-        return None
-    if resp.status_code != 200 or payload.get("errors"):
-        detail = payload.get("errors") or f"HTTP {resp.status_code}"
-        print(f"  board: graphql error: {str(detail)[:300]}", file=sys.stderr)
-        return None
-    return payload.get("data")
-
-
-def add_to_board(token: str, owner: str, issue_node_id: str) -> tuple[bool, str]:
-    """Add `issue_node_id` to `owner`'s org Project and set Status = Inbox.
-
-    Returns (ok, message) — `message` is a human-readable reason on failure, or a short success
-    note. Never raises: every failure path here is something a caller logs and continues past.
-    """
-    number = OWNER_PROJECT_NUMBER.get(owner)
-    if number is None:
-        return False, f"owner {owner!r} not in the board topology table"
-
-    data = _board_graphql(token, _BOARD_FIELDS_Q, {"owner": owner, "number": number})
-    proj = ((data or {}).get("repositoryOwner") or {}).get("projectV2")
-    if not proj:
-        return False, f"could not read project #{number} field map for {owner!r}"
-    if proj.get("closed"):
-        return False, f"project #{number} for {owner!r} is closed"
-
-    status_field = next(
-        (n for n in proj["fields"]["nodes"] if n and n.get("name") == "Status"), None
-    )
-    if not status_field:
-        return False, f"no Status field on {owner!r}'s project"
-    inbox_option = next(
-        (o["id"] for o in status_field.get("options", []) if o["name"] == "Inbox"), None
-    )
-    if inbox_option is None:
-        return False, f"no Inbox option on {owner!r}'s Status field"
-
-    project_id = proj["id"]
-    add_data = _board_graphql(
-        token, _ADD_ITEM_M, {"project": project_id, "content": issue_node_id}
-    )
-    item = (add_data or {}).get("addProjectV2ItemById", {}).get("item")
-    if not item:
-        return False, "addProjectV2ItemById failed"
-
-    set_data = _board_graphql(
-        token,
-        _SET_STATUS_M,
-        {
-            "project": project_id,
-            "item": item["id"],
-            "field": status_field["id"],
-            "option": inbox_option,
-        },
-    )
-    if set_data is None:
-        return False, "added to board but failed to set Status = Inbox"
-    return True, "added to board Inbox"
+# add_to_board, OWNER_PROJECT_NUMBER and the GraphQL seam now live in board_intake.py, extracted
+# for infra-commons/meta#1656 so every filer in this repo shares one mechanism.
 
 
 def issue_title(finding: dict) -> str:
@@ -1956,12 +1849,15 @@ def upsert_digest(
     suppressed_closed: set[str],
     new_findings: list[dict],
     run_url: str,
+    board_token: str = "",
+    board_owner: str = "",
 ) -> tuple[int, int]:
     """Create or update the rolling MEDIUM/LOW digest.
 
     Returns (issues_created, rows_added). New rows are appended to the existing
     digest, deduplicated by location so re-merging the same code does not
-    double-list a finding.
+    double-list a finding. A newly CREATED digest is boarded at Inbox
+    (infra-commons/meta#1656); the board-add runs after the create and cannot undo it.
     """
     existing_issue = open_issues.get(DIGEST_TITLE)
     if existing_issue is None and DIGEST_TITLE in suppressed_closed:
@@ -1991,8 +1887,10 @@ def upsert_digest(
         print(f"  Updated digest issue #{existing_issue['number']} (+{len(added_rows)} finding(s))")
         return 0, len(added_rows)
 
-    create_issue(token, repo, DIGEST_TITLE, body, ["security", "source:adversarial-ai"])
+    created_issue = create_issue(token, repo, DIGEST_TITLE, body, ["security", "source:adversarial-ai"])
     print(f"  Created digest issue with {len(added_rows)} finding(s)")
+    node_id = (created_issue or {}).get("node_id", "")
+    report_board(*board_issue(board_token, board_owner, node_id=node_id), "the digest issue")
     return 1, len(added_rows)
 
 
@@ -2266,7 +2164,7 @@ def main() -> None:
             criticals_new += 1
         if sev in BOARD_ADD_SEVERITIES:
             if not board_token:
-                print("  board: skipped — no BOARD_APP_TOKEN (org not yet provisioned)")
+                ok, msg = False, board_intake.NO_TOKEN_MESSAGE
             else:
                 try:
                     node_id = created_issue.get("node_id", "")
@@ -2275,11 +2173,12 @@ def main() -> None:
                     )
                 except Exception as exc:  # noqa: BLE001 — a board-add bug must never sink capture
                     ok, msg = False, f"unexpected error: {exc}"
-                print(f"  {'✓' if ok else 'board: skipped —'} {msg}")
+            report_board(ok, msg, title[:80])
         time.sleep(1)
 
     digest_issues, digest_rows = upsert_digest(
-        token, repo, open_issues, suppressed_closed, digest_findings, run_url
+        token, repo, open_issues, suppressed_closed, digest_findings, run_url,
+        board_token=board_token, board_owner=board_owner,
     )
 
     criticals_total = criticals_new + criticals_already_tracked
