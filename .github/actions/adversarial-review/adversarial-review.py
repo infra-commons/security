@@ -554,6 +554,15 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
             f"{model} returned an empty completion (stop_reason="
             f"{message.stop_reason!r}) — review did not run; not treating as clean."
         )
+    # A refusal can arrive MID-REVIEW with partial text already in `content`, so
+    # the empty-completion check above misses it and the partial text would read as a
+    # finished review. claude-sonnet-5-5 declines in five safety categories, one of
+    # them `cyber`, and this is a security reviewer. Fail closed, like max_tokens.
+    if message.stop_reason == "refusal":
+        raise RuntimeError(
+            f"{model} declined the review (stop_reason='refusal', stop_details="
+            f"{getattr(message, 'stop_details', None)!r}) — not treating as clean."
+        )
     if message.stop_reason == "max_tokens":
         raise RuntimeError(
             f"{model} hit the token budget before finishing the review "

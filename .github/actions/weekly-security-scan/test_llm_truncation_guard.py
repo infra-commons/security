@@ -63,6 +63,16 @@ def test_call_claude_raises_on_empty_completion(monkeypatch):
         scan.call_claude("key", "app", "codebase")
 
 
+def test_call_claude_raises_on_refusal_with_partial_text(monkeypatch):
+    # Non-empty text, so only the stop_reason says the scan did not finish.
+    response = _anthropic_response('{"findings": []}', stop_reason="refusal")
+    monkeypatch.setattr(
+        anthropic, "Anthropic",
+        lambda **kw: _FakeAnthropicClient(response))
+    with pytest.raises(RuntimeError, match="declined the scan"):
+        scan.call_claude("key", "app", "codebase")
+
+
 def test_call_claude_returns_content_on_a_clean_completion(monkeypatch):
     response = _anthropic_response('{"findings": []}', stop_reason="end_turn")
     monkeypatch.setattr(

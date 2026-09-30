@@ -436,6 +436,17 @@ def test_anthropic_truncated_completion_raises(monkeypatch):
         adv.call_anthropic("k", "m", "diff", "ctx", "sys")
 
 
+def test_anthropic_refusal_with_partial_text_raises(monkeypatch):
+    # Non-empty text, so only the stop_reason says the review did not finish.
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[SimpleNamespace(text='### CRITICAL\n_(or "None")_')],
+        stop_reason="refusal",
+    )
+    with pytest.raises(RuntimeError, match="declined the review"):
+        adv.call_anthropic("k", "m", "diff", "ctx", "sys")
+
+
 def test_anthropic_truncation_error_is_not_an_infra_error():
     # Must fail the job (and so block the gate), not fail open like a 5xx.
     assert adv._is_infra_error("anthropic", RuntimeError("token budget")) is False

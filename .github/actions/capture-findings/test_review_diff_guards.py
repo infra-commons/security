@@ -72,6 +72,17 @@ def test_review_diff_truncated_completion_raises(monkeypatch):
         capture.review_diff("k", "diff", "ctx", "")
 
 
+def test_review_diff_refusal_with_partial_text_raises(monkeypatch):
+    # Non-empty text, so only the stop_reason says the review did not finish.
+    _fake_anthropic(
+        monkeypatch,
+        content_blocks=[SimpleNamespace(text='{"findings": []}')],
+        stop_reason="refusal",
+    )
+    with pytest.raises(RuntimeError, match="declined the review"):
+        capture.review_diff("k", "diff", "ctx", "")
+
+
 # ── Thinking-block responses (2026-08-31) ───────────────────────────────────────
 #
 # claude-sonnet-5 returns a ThinkingBlock FIRST, and it has no `.text`, so the

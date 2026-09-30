@@ -649,6 +649,15 @@ def call_claude(
             f"{_ANTHROPIC_MODEL} returned an empty completion (stop_reason="
             f"{msg.stop_reason!r}) — scan did not run; not treating as clean."
         )
+    # A refusal can arrive MID-SCAN with partial text already in `content`, so
+    # the empty-completion check above misses it and the partial text would read as a
+    # finished scan. claude-sonnet-5-5 declines in five safety categories, one of
+    # them `cyber`, and this is a security reviewer. Fail closed, like max_tokens.
+    if msg.stop_reason == "refusal":
+        raise RuntimeError(
+            f"{_ANTHROPIC_MODEL} declined the scan (stop_reason='refusal', stop_details="
+            f"{getattr(msg, 'stop_details', None)!r}) — not treating as clean."
+        )
     if msg.stop_reason == "max_tokens":
         raise RuntimeError(
             f"{_ANTHROPIC_MODEL} hit the token budget before finishing the scan "
