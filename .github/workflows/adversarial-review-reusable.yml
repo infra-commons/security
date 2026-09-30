@@ -164,7 +164,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # adversarial-review/v1.16.0
+        uses: infra-commons/security/.github/actions/adversarial-review@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # adversarial-review/v1.19.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -197,7 +197,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # adversarial-review/v1.16.0
+        uses: infra-commons/security/.github/actions/adversarial-review@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # adversarial-review/v1.19.0
         with:
           provider: ${{ inputs.second-opinion-provider }}
           # THE SECOND ARM IS A FULL CONDITION, NOT A BARE FALLBACK, and that is the whole
@@ -283,13 +283,13 @@ jobs:
       # inline shell they were reachable only in production, which is where
       # this gate's worst failure mode kept being discovered.
       #
-      # The SHA below is the adversarial-review/v1.16.0 release commit, shared with
+      # The SHA below is the adversarial-review/v1.19.0 release commit, shared with
       # the two reviewer steps above so one release is one SHA in this file. It is
       # deliberately NOT tagged in this action's own family: no
       # `adversarial-review-gate/vX.Y.Z` tag exists past v1.3.0, and the moving
       # `adversarial-review-gate/v1` still points at 01fff5eb (2026-08-15). That did
-      # NOT change when v1.16.0 was released on 2026-09-04: the release cut
-      # `adversarial-review/v1.16.0` and `capture-findings/v1.16.0` and left
+      # NOT change when v1.19.0 was released on 2026-09-30 (re-checked against the
+      # remote's tags that day): the release cut `adversarial-review/v1.19.0` and left
       # `adversarial-review-gate/v1` where it was, because the gate family is not in
       # the release set at all — its only `uses:` is this SHA pin, which
       # `discover_pins()` ignores by design, and there is no
@@ -318,17 +318,19 @@ jobs:
       # nothing in this repo goes red — the gate family is in no release set and no
       # verify set, so there is no check to fail.
       #
-      # This bump is a no-op for the gate's RUNTIME, and this time for the whole
-      # directory: every file under `.github/actions/adversarial-review-gate/` is
-      # byte-identical between d758e6aa (v1.15.0) and 2b68d5ed (v1.16.0) — not only
-      # `action.yml` and `gate.py`, which remain unchanged since #135 (1241d6a8).
-      # Do not carry this sentence forward unverified: the v1.15.0 bump did move a
-      # file in this directory (`test_gate_wiring.py`, #151), so the claim has to be
-      # re-derived per bump rather than copied. The v1.16.0 payload (#158) lands
-      # entirely in the reviewer composite.
+      # This bump (2026-09-30) is a no-op for the gate's RUNTIME: between 2b68d5ed
+      # (v1.16.0) and 6a000009 (v1.19.0), `action.yml` and `gate.py` are
+      # byte-identical. The directory is NOT: `test_gate_wiring.py` gained the
+      # meta#1656 state-bearing-recorder test (#167), which asserts on THIS file and
+      # is never executed by the action. Do not carry this sentence forward
+      # unverified — re-derive it per bump. The v1.19.0 payload lands in the
+      # reviewer composite: #165 (the `openrouter` second-opinion provider, which
+      # this file has passed through since #165 but v1.16.0 rejected as an unknown
+      # PROVIDER), #167 (docs) and #168 (the gate model claude-sonnet-5 ->
+      # claude-sonnet-5-5, and `stop_reason == "refusal"` now fails the review).
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@2b68d5eda62072ad3f6b65a0a44a72ce0becf26b # = adversarial-review/v1.16.0
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # = adversarial-review/v1.19.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
