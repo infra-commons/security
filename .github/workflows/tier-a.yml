@@ -52,6 +52,7 @@ name: Security — Tier A (reusable)
 #   permissions:
 #     contents: read
 #     pull-requests: write
+#     issues: write   # the adversarial-review gate's quota/degraded-pass marker issues
 #
 # Tier A repos: platform-iac, solution-*, clients-config
 # Note: existing solution repos call the individual reusable workflows directly
@@ -127,6 +128,15 @@ jobs:
   # GitHub resolves chained `uses:` refs independently — @main would always pull
   # the latest regardless of which SHA tier-a.yml was called at. Update this SHA
   # alongside any breaking change to adversarial-review-reusable.yml.
+  # The pin is only real if the reusable at that SHA also pins its composites by SHA. The
+  # previous pin (79a6885, 2026-06-12) did not: it ran both composites at @main, so tier-a
+  # consumers got whatever main had. 1ecab6b (#169) runs adversarial-review v1.19.0
+  # (6a00000: claude-sonnet-5-5 gate, refusal fails closed) at a hard SHA.
+  #
+  # Job-level permissions: this file's top-level `permissions: {}` would otherwise apply to this
+  # calling job, and a called workflow's token is capped by its caller, so the reusable's jobs
+  # (`contents: read` + `pull-requests: write` for the reviewers, `issues: write` for the gate)
+  # would startup-fail the whole run, Gitleaks and Semgrep included.
   #
   # infra-commons/security#102: this job has the same "if: false still reports a satisfying
   # skipped check" shape as the semgrep job above, but it CANNOT get the same fix (dropping the
@@ -140,11 +150,18 @@ jobs:
   # meaningful non-PR equivalent to fall back to; the real fix is preventing this check run from
   # being created at all on non-PR events, which needs the caller to invoke a PR-only reusable
   # from a separately-triggered job rather than gating a job inside this one — out of scope here.
-  # There is no live caller of tier-a.yml today, so this gap is currently dormant; don't "fix" it
-  # by analogy with the semgrep change above without re-deriving the above first.
+  # Callers, per #168's census and re-measured 2026-09-30 across 5 orgs (43 repos, 352 workflow
+  # files): three org shims reference this file. cashbucket-com/security and klsjapan-com/security
+  # pin it @de6eea4, and chargingblindly-com/security tracks @main. No workflow calls any of the
+  # three shims, so nothing runs tier-a.yml end to end and this gap is still dormant. Don't "fix"
+  # it by analogy with the semgrep change above without re-deriving the above first.
   adversarial-review:
     if: github.event_name == 'pull_request'
-    uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@79a6885cc67dba7eb40d655de959e3a2eb9367f3
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@1ecab6b6050c2d38ff606de8c9db66222a3c9193 # adversarial-review composites = v1.19.0 (#169)
     with:
       run-openai: ${{ inputs.run_openai }}
     secrets:
