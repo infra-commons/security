@@ -52,9 +52,9 @@ import yaml  # pyyaml
 PROVIDERS = {
     "anthropic": {
         # MID tier, the default for gates (infra-commons/meta model-registry.yaml
-        # `tier_equivalence:`). Lateral bump off claude-sonnet-4-6, which is absent from
-        # the provider's current catalog.
-        "model": "claude-sonnet-5",
+        # `tier_equivalence:`). Lateral bump off claude-sonnet-5 (meta#1664), which the
+        # provider's current catalog lists as superseded by claude-sonnet-5-5.
+        "model": "claude-sonnet-5-5",
         "label": "Claude",
         "marker": "<!-- adversarial-review-bot -->",
         # The primary reviewer blocks on a CRITICAL finding anywhere in the diff.
@@ -553,6 +553,15 @@ def call_anthropic(api_key: str, model: str, diff: str, context: str, system_pro
         raise RuntimeError(
             f"{model} returned an empty completion (stop_reason="
             f"{message.stop_reason!r}) — review did not run; not treating as clean."
+        )
+    # A refusal can arrive MID-REVIEW with partial text already in `content`, so
+    # the empty-completion check above misses it and the partial text would read as a
+    # finished review. claude-sonnet-5-5 declines in five safety categories, one of
+    # them `cyber`, and this is a security reviewer. Fail closed, like max_tokens.
+    if message.stop_reason == "refusal":
+        raise RuntimeError(
+            f"{model} declined the review (stop_reason='refusal', stop_details="
+            f"{getattr(message, 'stop_details', None)!r}) — not treating as clean."
         )
     if message.stop_reason == "max_tokens":
         raise RuntimeError(

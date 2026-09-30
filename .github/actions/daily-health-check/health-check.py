@@ -62,7 +62,7 @@ except ImportError:
 # has ever existed, and it appears in neither the provider's current roster nor its
 # deprecation table, which lists recently-retired models too.
 _TRIAGE_MODEL  = "claude-haiku-4-5-20251001"   # Fast, cheap diagnosis
-_AUTOFIX_MODEL = "claude-sonnet-5"             # More capable for generating fixes
+_AUTOFIX_MODEL = "claude-sonnet-5-5"           # More capable for generating fixes
 
 _LABEL_HEALTH    = "source:health-check"
 _LABEL_WF_FAIL   = "workflow-failure"

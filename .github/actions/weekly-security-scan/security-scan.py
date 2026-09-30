@@ -521,7 +521,7 @@ Rules:
 # error message naming a model the code no longer calls. Every one of those repeats was
 # reported as a separate "stale pin" by the weekly model-freshness check, which is a fair
 # reading: an error string that names the wrong model is wrong.
-_ANTHROPIC_MODEL = "claude-sonnet-5"
+_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
 # Terra, not Sol — a correction to the 2026-08-28 pick, on the operator's call. The earlier
 # reasoning ("a security scan should get the reasoning-strongest model in the tier") had the
@@ -648,6 +648,15 @@ def call_claude(
         raise RuntimeError(
             f"{_ANTHROPIC_MODEL} returned an empty completion (stop_reason="
             f"{msg.stop_reason!r}) — scan did not run; not treating as clean."
+        )
+    # A refusal can arrive MID-SCAN with partial text already in `content`, so
+    # the empty-completion check above misses it and the partial text would read as a
+    # finished scan. claude-sonnet-5-5 declines in five safety categories, one of
+    # them `cyber`, and this is a security reviewer. Fail closed, like max_tokens.
+    if msg.stop_reason == "refusal":
+        raise RuntimeError(
+            f"{_ANTHROPIC_MODEL} declined the scan (stop_reason='refusal', stop_details="
+            f"{getattr(msg, 'stop_details', None)!r}) — not treating as clean."
         )
     if msg.stop_reason == "max_tokens":
         raise RuntimeError(

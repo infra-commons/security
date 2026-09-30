@@ -85,7 +85,7 @@ PLATFORM_IAC_REPO = "infra-commons/security"
 #
 # MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`), the default
 # for scan and review jobs.
-_ANTHROPIC_MODEL = "claude-sonnet-5"
+_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
 MAX_DIFF_CHARS = 80_000
 MAX_SUPPRESSIONS_BYTES = 256_000  # ~4x current file size; bounds runner memory pre-parse
@@ -728,6 +728,15 @@ def review_diff(api_key: str, diff: str, context: str, suppression_context: str)
         raise RuntimeError(
             f"{_ANTHROPIC_MODEL} returned an empty completion (stop_reason="
             f"{msg.stop_reason!r}) — review did not run; not treating as clean."
+        )
+    # A refusal can arrive MID-REVIEW with partial text already in `content`, so
+    # the empty-completion check above misses it and the partial text would read as a
+    # finished review. claude-sonnet-5-5 declines in five safety categories, one of
+    # them `cyber`, and this is a security reviewer. Fail closed, like max_tokens.
+    if msg.stop_reason == "refusal":
+        raise RuntimeError(
+            f"{_ANTHROPIC_MODEL} declined the review (stop_reason='refusal', stop_details="
+            f"{getattr(msg, 'stop_details', None)!r}) — not treating as clean."
         )
     if msg.stop_reason == "max_tokens":
         raise RuntimeError(
