@@ -52,9 +52,9 @@ import yaml  # pyyaml
 PROVIDERS = {
     "anthropic": {
         # MID tier, the default for gates (infra-commons/meta model-registry.yaml
-        # `tier_equivalence:`). Lateral bump off claude-sonnet-4-6, which is absent from
-        # the provider's current catalog.
-        "model": "claude-sonnet-5",
+        # `tier_equivalence:`). Lateral bump off claude-sonnet-5 (meta#1664), which the
+        # provider's current catalog lists as superseded by claude-sonnet-5-5.
+        "model": "claude-sonnet-5-5",
         "label": "Claude",
         "marker": "<!-- adversarial-review-bot -->",
         # The primary reviewer blocks on a CRITICAL finding anywhere in the diff.

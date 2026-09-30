@@ -85,7 +85,7 @@ PLATFORM_IAC_REPO = "infra-commons/security"
 #
 # MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`), the default
 # for scan and review jobs.
-_ANTHROPIC_MODEL = "claude-sonnet-5"
+_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
 MAX_DIFF_CHARS = 80_000
 MAX_SUPPRESSIONS_BYTES = 256_000  # ~4x current file size; bounds runner memory pre-parse

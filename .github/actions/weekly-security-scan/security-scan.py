@@ -521,7 +521,7 @@ Rules:
 # error message naming a model the code no longer calls. Every one of those repeats was
 # reported as a separate "stale pin" by the weekly model-freshness check, which is a fair
 # reading: an error string that names the wrong model is wrong.
-_ANTHROPIC_MODEL = "claude-sonnet-5"
+_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 
 # Terra, not Sol — a correction to the 2026-08-28 pick, on the operator's call. The earlier
 # reasoning ("a security scan should get the reasoning-strongest model in the tier") had the
