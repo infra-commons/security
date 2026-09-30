@@ -372,6 +372,14 @@ jobs:
       # check) on that path is the correct, safe-direction behaviour instead:
       # worst case one PR is blocked by a `gh` API failure, not every
       # subsequent PR merged unreviewed for the rest of the billing period.
+      #
+      # NOT AN INFORMATIONAL NOTICE. The operator's 2026-09-29 ruling on
+      # infra-commons/meta#1656 (stop filing informational notices as issues)
+      # names quota-exhausted, but this issue is the gate's only memory between
+      # runs — the lookup step above reads it back. Deleting this step would turn
+      # "fail open once, then block" into fail-open on every PR for the whole
+      # billing period. It stays until a non-issue store for that memory exists;
+      # see reviews/2026-09-30-informational-notice-filing-ruling.md.
       - name: Record that the provider quota is exhausted
         if: ${{ always() && steps.evaluate.outputs.quota_exhausted == 'true' && github.event_name == 'pull_request' }}
         env:
@@ -491,6 +499,14 @@ jobs:
       # search API (infra-commons/security#78, created and torn down for this
       # check) that `label:"ns:value"` — quoted, colon included — parses and
       # filters correctly rather than silently matching nothing.
+      #
+      # NOT AN INFORMATIONAL NOTICE either, despite the 2026-09-29 ruling on
+      # infra-commons/meta#1656 naming degraded-pass: merge-ready.py's
+      # `fetch_degraded_pass_prs` reads this issue to hold the PR at T2, and
+      # /merge and /pipeline have no other source. Deleting this step would let a
+      # degraded PR bulk-merge unread. It stays until that consumer reads the
+      # degraded state from somewhere else first; see
+      # reviews/2026-09-30-informational-notice-filing-ruling.md.
       - name: Record a degraded pass
         if: ${{ always() && steps.evaluate.outputs.degraded == 'true' && github.event_name == 'pull_request' }}
         env:
