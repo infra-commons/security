@@ -172,6 +172,30 @@ def test_the_degraded_pass_title_still_matches_the_downstream_consumer_contract(
     assert 'TITLE="[security] Adversarial review passed degraded on PR #${PR_NUMBER}"' in run
 
 
+# infra-commons/meta#1656, operator ruling 2026-09-29: stop filing informational
+# notices as issues. It names degraded-pass and quota-exhausted, and deleting these
+# two steps reads like carrying it out. It is not: each issue is state that code
+# reads back. See reviews/2026-09-30-informational-notice-filing-ruling.md.
+@pytest.mark.parametrize("step_name, reader", [
+    ("Record that the provider quota is exhausted",
+     "the gate's own 'Look up the quota tracking issue' step on the next PR — "
+     "without it every quota-exhausted PR fails open for the whole billing period"),
+    ("Record a degraded pass",
+     "sharedinfra/scripts/merge-ready.py fetch_degraded_pass_prs (T2 hold) — "
+     "without it a degraded PR bulk-merges unread"),
+])
+def test_the_state_bearing_notice_recorders_are_not_removable_as_informational(step_name, reader):
+    steps = _load(_WORKFLOW)["jobs"]["gate"]["steps"]
+    names = {s.get("name") for s in steps}
+    why = (f"{step_name!r} files an issue that is read back by {reader}. The meta#1656 "
+           f"ruling does not cover removing it until that reader has another source; "
+           f"see reviews/2026-09-30-informational-notice-filing-ruling.md")
+    assert step_name in names, why
+    assert "gh issue create" in _step_run(step_name), why
+    if "quota" in step_name:
+        assert "Look up the quota tracking issue" in names, why
+
+
 # infra-commons/security#81 — the quota marker has the same title-squat exposure
 # #80 fixed above, but with one difference: nothing outside this workflow reads it.
 # The "Look up the quota tracking issue" step reads back what "Record that the
