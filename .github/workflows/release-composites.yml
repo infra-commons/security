@@ -56,6 +56,12 @@ jobs:
       # Tag moves are last-write-wins. Serialise them so two pushes cannot race
       # and leave a tag pointing at the older of the two. Scoped to this job so
       # the lock covers the thing that actually takes it.
+      #
+      # Since every run now releases main's tip (infra-commons/meta#1661),
+      # queued runs collapse on their own: GitHub keeps one pending run per
+      # group, and whichever runs after a release finds nothing behind and
+      # no-ops. `cancel-in-progress` stays false because cancelling a release
+      # between its tag pushes is worse than one redundant run.
       group: release-composites
       cancel-in-progress: false
     # `workflow_run` fires on failure too; releasing off a red test run is the
@@ -126,6 +132,9 @@ jobs:
       # reverting to GITHUB_TOKEN; the ruleset (once restored, same runbook)
       # will not permit it.
       contents: read
+      # Reading the Tests workflow's runs, to confirm main's tip passed when it
+      # is not the commit that triggered this run.
+      actions: read
     steps:
       - name: Mint an installation token as infra-commons-bot
         # Scoped to exactly this repo and exactly the permission needed to
@@ -151,19 +160,30 @@ jobs:
           # directory's tree at HEAD against its tree at the moving tag.
           fetch-depth: 0
           fetch-tags: true
-          # Pin to the exact commit the tests passed on, not to whatever `main`
-          # points at now. Without this a push landing mid-run would be released
-          # on the strength of the previous commit's tests.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # main's tip, NOT `workflow_run.head_sha` (infra-commons/meta#1661): an
+          # App token without `workflows` cannot tag an older commit whose
+          # workflow files differ from main's (run 36792586886). The tests gate
+          # lives in the script: a tip that is not the triggering commit is
+          # released only on its own green Tests run, and a mid-run push defers.
+          ref: main
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v6
         with:
           python-version: "3.12"
 
       - name: Release any composite whose tag is behind
+        id: release
+        env:
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Read-only use: confirming Tests passed on main's tip when it is not
+          # the commit that triggered this run. Never used to push.
+          GITHUB_TOKEN: ${{ github.token }}
         run: python .github/scripts/release_composites.py
 
       - name: Verify every moving tag now matches the released code
+        # Skipped only when the release deferred to a newer run, which leaves
+        # the tags deliberately behind this checkout; that run verifies them.
+        if: ${{ steps.release.outputs.deferred != 'true' }}
         # Separate from the step above on purpose. The release step reporting
         # success is the release mechanism vouching for itself; this re-reads the
         # tags and compares content. A release that reports green without landing
