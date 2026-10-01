@@ -400,3 +400,100 @@ def test_the_notice_does_not_fire_on_the_triggers_that_can_release():
     real release path, or every scheduled run grows a misleading annotation."""
     for event in ("workflow_run", "schedule", "push", ""):
         assert check.dispatch_cannot_release_notice(event) is None, event
+
+
+# ── always tag main's tip (infra-commons/meta#1661) ───────────────────────────
+# Run 36792586886 was approved after main moved and tagged its older commit;
+# GitHub refused the push because main had changed a workflow file since. The
+# releaser now tags main's tip, and only on that tip's own green Tests run.
+
+
+def _stale_family_with_origin(tmp_path: Path) -> tuple[Path, str, str]:
+    """A clone of a bare origin whose `fam/v1` is behind; returns (root, old, tip)."""
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    (tmp_path / "work").mkdir()
+    root = _git_repo(tmp_path / "work")
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=root, check=True)
+    _write(root, ".github/actions/fam/action.yml", "name: fam\n# v1\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fam v1"], cwd=root, check=True)
+    subprocess.run(["git", "tag", "fam/v1"], cwd=root, check=True)
+    subprocess.run(["git", "tag", "fam/v1.0.0"], cwd=root, check=True)
+    _write(
+        root,
+        ".github/workflows/consumer.yml",
+        "    uses: infra-commons/security/.github/actions/fam@fam/v1\n",
+    )
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "pin"], cwd=root, check=True)
+    old = check.git("rev-parse", "HEAD", cwd=root)
+    _write(root, ".github/actions/fam/action.yml", "name: fam\n# v2\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fam v2"], cwd=root, check=True)
+    tip = check.git("rev-parse", "HEAD", cwd=root)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/main", "--tags"], cwd=root, check=True)
+    return root, old, tip
+
+
+def _run(monkeypatch, root: Path, trigger: str, green):
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("TRIGGER_SHA", trigger)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(release, "tests_passed", green)
+    return release.main()
+
+
+def test_a_stale_trigger_releases_main_tip_and_says_so(tmp_path, monkeypatch, capsys):
+    root, old, tip = _stale_family_with_origin(tmp_path)
+    assert _run(monkeypatch, root, old, lambda sha, *_: sha == tip) == 0
+    out = capsys.readouterr().out
+    assert f"Triggered by {old[:12]}" in out and tip[:12] in out
+    assert check.git("rev-parse", "fam/v1^{commit}", cwd=root) == tip
+    assert check.git("rev-parse", "fam/v1.1.0^{commit}", cwd=root) == tip
+
+
+def test_a_stale_trigger_releases_nothing_until_the_tip_is_green(tmp_path, monkeypatch, capsys):
+    root, old, _tip = _stale_family_with_origin(tmp_path)
+    assert _run(monkeypatch, root, old, lambda *_: False) == 0
+    assert "Tests have not passed" in capsys.readouterr().out
+    assert check.git("rev-parse", "fam/v1^{commit}", cwd=root) != _tip
+    assert not check.git("tag", "--list", "fam/v1.1.0", cwd=root)
+
+
+def test_an_unreadable_tests_answer_fails_closed(tmp_path, monkeypatch):
+    root, old, _tip = _stale_family_with_origin(tmp_path)
+
+    def unreachable(*_):
+        raise OSError("api down")
+
+    assert _run(monkeypatch, root, old, unreachable) == 1
+    assert not check.git("tag", "--list", "fam/v1.1.0", cwd=root)
+
+
+def test_main_moving_mid_run_defers_instead_of_tagging(tmp_path, monkeypatch, capsys):
+    root, _old, tip = _stale_family_with_origin(tmp_path)
+    out_file = tmp_path / "out"
+    monkeypatch.setattr(release, "remote_main_sha", lambda _root: "f" * 40)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("TRIGGER_SHA", tip)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    assert release.main() == 0
+    assert "main moved" in capsys.readouterr().out
+    assert "deferred=true" in out_file.read_text(encoding="utf-8")
+    assert not check.git("tag", "--list", "fam/v1.1.0", cwd=root)
+
+
+def test_a_version_already_at_the_tip_is_reused_not_recut(tmp_path, monkeypatch):
+    """A run that pushed the release tag and died before moving `vN`: the rerun
+    moves `vN` onto the existing tag rather than cutting fam/v1.2.0 too."""
+    root, _old, tip = _stale_family_with_origin(tmp_path)
+    subprocess.run(["git", "tag", "fam/v1.1.0", tip], cwd=root, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "fam/v1.1.0"], cwd=root, check=True)
+    assert release.version_tag_at("fam", "fam/v1", tip, root) == "fam/v1.1.0"
+    assert _run(monkeypatch, root, tip, lambda *_: True) == 0
+    assert check.git("rev-parse", "fam/v1^{commit}", cwd=root) == tip
+    assert not check.git("tag", "--list", "fam/v1.2.0", cwd=root)

@@ -15,10 +15,14 @@ the tree at its `<family>/vN` moving tag, this:
 
 Safety properties, in the order they matter:
 
-* **Post-merge only.** It runs on `push` to `main`, so HEAD is always a merged
-  commit. Moving a tag onto a pre-merge commit is the 2026-07-21 hazard and is
-  structurally impossible here; there is no input by which a caller can point it
-  at a branch.
+* **Post-merge only, and only main's tip.** The job checks out `main`, not the
+  triggering run's commit, so HEAD is always a merged commit. Moving a tag onto
+  a pre-merge commit is the 2026-07-21 hazard and is structurally impossible
+  here; there is no input by which a caller can point it at a branch. An
+  *older* main commit is never tagged either: a run approved after main moved
+  failed that way (infra-commons/meta#1661, run 36792586886), because GitHub
+  rejects an App-token tag push whose commit's workflow files differ from
+  main's unless the token holds `workflows`, which it deliberately does not.
 * **Tests first.** The calling workflow gates this on every composite test job
   passing. These tags reach 13+ repos' merge gates with no per-caller pin bump
   to review them, so the tests are the only thing between an edit and the fleet.
@@ -41,10 +45,13 @@ nothing anywhere said so.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,6 +65,9 @@ from check_composite_tags_released import (  # noqa: E402
     surface_paths,
     tree_at,
 )
+
+GITHUB_API = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+TESTS_WORKFLOW = "tests.yml"
 
 _VERSION_TAG_RE = re.compile(r"^(?P<family>[A-Za-z0-9._-]+)/v(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)$")
 
@@ -81,6 +91,58 @@ def next_version(family: str, moving_tag: str, root: Path) -> str:
     return f"{family}/v{major}.{next_minor}.0"
 
 
+def version_tag_at(family: str, moving_tag: str, sha: str, root: Path) -> str | None:
+    """An immutable release tag on this major line already pointing at `sha`.
+
+    A run that pushed the release tag and then died before moving the moving tag
+    leaves exactly this behind. Reusing it keeps the rerun clean instead of
+    cutting a second version for the same commit.
+    """
+    major = int(moving_tag.rsplit("/v", 1)[1])
+    for minor, patch in reversed(existing_versions(family, major, root)):
+        tag = f"{family}/v{major}.{minor}.{patch}"
+        if git("rev-parse", f"{tag}^{{commit}}", cwd=root) == sha:
+            return tag
+    return None
+
+
+def remote_main_sha(root: Path) -> str:
+    """main's tip on the remote right now, not at checkout."""
+    out = git("ls-remote", "origin", "refs/heads/main", cwd=root)
+    return out.split()[0] if out else ""
+
+
+def tests_passed(sha: str, repo: str, token: str) -> bool:
+    """Whether the Tests workflow has a successful `push` run on `sha`.
+
+    Raises on any API failure. An unreadable answer is an unknown, and releasing
+    untested code on an unknown is the one thing this job must never do.
+    """
+    query = urllib.parse.urlencode(
+        {"head_sha": sha, "event": "push", "branch": "main", "status": "success"}
+    )
+    request = urllib.request.Request(
+        f"{GITHUB_API}/repos/{repo}/actions/workflows/{TESTS_WORKFLOW}/runs?{query}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return int(json.load(response)["total_count"]) > 0
+
+
+def defer(reason: str) -> None:
+    """Hand the release to a newer run. `deferred=true` stops the verify step
+    reporting the deliberately untagged HEAD as a failed release."""
+    print(f"::notice::{reason}")
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as handle:
+            handle.write("deferred=true\n")
+
+
 def main() -> int:
     root = Path(
         os.environ.get("GITHUB_WORKSPACE")
@@ -89,6 +151,33 @@ def main() -> int:
     dry_run = os.environ.get("DRY_RUN", "").lower() in {"1", "true", "yes"}
 
     head = git("rev-parse", "HEAD", cwd=root)
+    trigger = os.environ.get("TRIGGER_SHA", "")
+    if trigger and trigger != head:
+        # The run that fired this one tested an older commit; main has moved
+        # since (usually a run left waiting on `fleet-release` while more merged).
+        # Release the tip instead, but only on the strength of the tip's OWN
+        # green Tests run: the triggering run's success says nothing about it.
+        print(
+            f"::notice::Triggered by {trigger[:12]}, but main's tip is now "
+            f"{head[:12]}. Releasing main's tip, not the triggering commit."
+        )
+        if not dry_run:
+            try:
+                green = tests_passed(
+                    head,
+                    os.environ.get("GITHUB_REPOSITORY", ""),
+                    os.environ.get("GITHUB_TOKEN", ""),
+                )
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"::error::Could not confirm Tests passed on {head[:12]}: {exc}")
+                return 1
+            if not green:
+                defer(
+                    f"Tests have not passed on {head[:12]} (yet). Releasing "
+                    "nothing; that commit's own Tests run triggers its own release."
+                )
+                return 0
+
     pins = discover_families(root)
     if not pins:
         print(
@@ -98,6 +187,7 @@ def main() -> int:
         return 1
 
     released: list[str] = []
+    deferred = False
     for family, moving_tag in sorted(pins.items()):
         paths = surface_paths(family, root)
         head_tree = surface_hashes("HEAD", family, root, paths)
@@ -113,7 +203,8 @@ def main() -> int:
             print(f"{family}: already released at `{moving_tag}`, nothing to do")
             continue
 
-        version_tag = next_version(family, moving_tag, root)
+        existing = version_tag_at(family, moving_tag, head, root)
+        version_tag = existing or next_version(family, moving_tag, root)
         state = "does not exist yet" if tag_tree is None else "is behind"
         print(f"{family}: `{moving_tag}` {state}, releasing {version_tag} at {head[:12]}")
 
@@ -121,11 +212,25 @@ def main() -> int:
             released.append(f"{family} -> {version_tag} (dry run)")
             continue
 
+        # Only ever tag main's tip. If main moved during this run, the newer
+        # commit's own release run releases it, and whatever is left here.
+        remote = remote_main_sha(root)
+        if remote != head:
+            defer(
+                f"main moved to {remote[:12]} during this run. Not tagging "
+                f"{head[:12]}; the newer commit's own release run releases the rest."
+            )
+            deferred = True
+            break
+
         # The immutable release tag is created, never forced. `protect-immutable-tags`
         # has no bypass actor at all, so an attempt to move one is rejected by the
         # server; failing loudly on a local collision is the same answer, sooner.
-        git("tag", version_tag, head, cwd=root)
-        git("push", "origin", version_tag, cwd=root)
+        if existing:
+            print(f"{family}: {version_tag} already tags {head[:12]}, moving `{moving_tag}` only")
+        else:
+            git("tag", version_tag, head, cwd=root)
+            git("push", "origin", version_tag, cwd=root)
 
         # The moving tag is a force by definition. `protect-moving-tags` permits
         # this only for the App whose token this job runs as.
@@ -149,6 +254,8 @@ def main() -> int:
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if released:
         lines = ["### Composites released", ""] + [f"- `{line}`" for line in released]
+    elif deferred:
+        lines = ["### Composites released", "", "None. main moved; deferred to the newer run."]
     else:
         lines = ["### Composites released", "", "None. Every moving tag already matched `main`."]
     print("\n".join(lines))
