@@ -671,6 +671,34 @@ def test_diagnose_with_claude_falls_back_on_max_tokens_truncation(monkeypatch):
     assert result == hc._diagnose_fallback(hc.select_log_excerpt(DEPLOY_LOG, 12_000))
 
 
+def test_diagnose_with_claude_survives_haiku_5_5_thinking(monkeypatch):
+    # Haiku 5.5 runs adaptive thinking by default: content[0] may be a thinking
+    # block with no `.text`, and thinking is charged against max_tokens. Pin the
+    # model, a budget with room for that reasoning, and the thinking-first parse.
+    sent = {}
+    answer = ('{"is_transient": false, "root_cause": "r", "fix": "f", '
+              '"severity": "low", "mechanical": false}')
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            sent.update(kwargs)
+            thinking = type("Block", (), {"type": "thinking", "thinking": "..."})()
+            text = type("Block", (), {"type": "text", "text": answer})()
+            return type("Msg", (), {"content": [thinking, text], "stop_reason": "end_turn"})()
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            self.messages = _FakeMessages()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(hc, "anthropic_sdk", type("SDK", (), {"Anthropic": _FakeClient}))
+
+    result = hc.diagnose_with_claude("wf", "job", "step", DEPLOY_LOG, "o/r")
+    assert sent["model"] == "claude-haiku-5-5"
+    assert sent["max_tokens"] >= 2048
+    assert result == json.loads(answer)
+
+
 def test_try_autofix_declines_on_max_tokens_truncation(monkeypatch, tmp_path):
     class _FakeMessages:
         def create(self, **kwargs):

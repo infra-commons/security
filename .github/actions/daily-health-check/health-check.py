@@ -61,7 +61,7 @@ except ImportError:
 # Sonnet 4's release date (`claude-sonnet-4-20250514`, retired 2026-06-15). No such model
 # has ever existed, and it appears in neither the provider's current roster nor its
 # deprecation table, which lists recently-retired models too.
-_TRIAGE_MODEL  = "claude-haiku-4-5-20251001"   # Fast, cheap diagnosis
+_TRIAGE_MODEL  = "claude-haiku-5-5"            # Fast, cheap diagnosis
 _AUTOFIX_MODEL = "claude-sonnet-5-5"           # More capable for generating fixes
 
 _LABEL_HEALTH    = "source:health-check"
@@ -916,7 +916,11 @@ mechanical   = true for: clearly fixable with a small edit to a workflow/config 
         client = anthropic_sdk.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model=_TRIAGE_MODEL,
-            max_tokens=512,
+            # Haiku 5.5 thinks adaptively by default, and thinking tokens count
+            # against this budget. The JSON answer is ~150 tokens; at the old 512
+            # the reasoning could spend the budget first, trip the stop_reason
+            # guard below, and silently degrade every diagnosis to the fallback.
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
         # A truncated completion must not be parsed as if it were complete —
@@ -1047,7 +1051,9 @@ If you cannot identify a single confident fix, return: {{"old_string": null}}"""
         client = anthropic_sdk.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model=_AUTOFIX_MODEL,
-            max_tokens=1024,
+            # Same reason as diagnose_with_claude(): Sonnet 5.5 thinks adaptively
+            # and that reasoning is charged against this budget.
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
         # A truncated completion must not be parsed as a confident fix — make the
