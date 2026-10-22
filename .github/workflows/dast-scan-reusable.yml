@@ -51,7 +51,10 @@ on:
         required: false
         default: ""
       min_severity:
-        description: Minimum Nuclei severity to report.
+        description: >-
+          Minimum Nuclei severity to scan for: templates at this severity and
+          every severity above it run. One of info, low, medium, high, critical;
+          any other value fails the job.
         type: string
         required: false
         default: medium
@@ -133,6 +136,25 @@ jobs:
           fi
           echo "Target: $TARGET_URL"
 
+      # Expand the min_severity floor into the full band above it, once, for both
+      # scan steps. Listing only "$MIN_SEVERITY,high,critical" skipped medium for a
+      # low/info floor, and a scan that never ran medium templates reads as clean.
+      - name: Resolve Nuclei severity band
+        run: |
+          case "$MIN_SEVERITY" in
+            info)     band="info,low,medium,high,critical" ;;
+            low)      band="low,medium,high,critical" ;;
+            medium)   band="medium,high,critical" ;;
+            high)     band="high,critical" ;;
+            critical) band="critical" ;;
+            *)
+              echo "::error::min_severity '$MIN_SEVERITY' is not one of: info, low, medium, high, critical." >&2
+              exit 1
+              ;;
+          esac
+          echo "NUCLEI_SEVERITIES=$band" >> "$GITHUB_ENV"
+          echo "Nuclei severity band: $band"
+
       - name: Health-check target before scanning
         run: |
           STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "$TARGET_URL/health" || echo "000")
@@ -159,7 +181,7 @@ jobs:
             -t nuclei-templates/ \
             -tags misconfiguration,exposure,ssl,headers,tech \
             -exclude-tags "$EXCLUDE_TAGS" \
-            -severity "$MIN_SEVERITY,high,critical" \
+            -severity "$NUCLEI_SEVERITIES" \
             -rate-limit 10 \
             -timeout 10 \
             -bulk-size 10 \
@@ -185,7 +207,7 @@ jobs:
             -tags misconfiguration,headers \
             -exclude-tags "$EXCLUDE_TAGS" \
             -header "Authorization: Bearer $UPLOAD_SECRET" \
-            -severity "$MIN_SEVERITY,high,critical" \
+            -severity "$NUCLEI_SEVERITIES" \
             -rate-limit 5 \
             -timeout 10 \
             -no-interactsh \
