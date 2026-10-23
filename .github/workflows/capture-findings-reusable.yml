@@ -129,7 +129,12 @@ jobs:
       # secret's presence has to be mapped here and tested as a plain env var below. A step
       # cannot read its own `env:` block from its own `if:` — this has to sit at job level so it
       # exists before the first step's `if:` is evaluated.
-      BOARD_APP_KEY: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY }}
+      #
+      # Only the secret's PRESENCE ("true"/"false") is mapped, never its value (infra-commons/meta#1775):
+      # job env is readable by every step and child process in the job, including third-party
+      # actions and pip installs. The one step that needs the key reads it from `secrets.` in its
+      # own `with:` below.
+      BOARD_APP_KEY_SET: ${{ secrets.INFRA_COMMONS_BOT_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -146,7 +151,7 @@ jobs:
       #     does not, so the findings capture below still runs to completion.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: board-token
-        if: ${{ env.BOARD_APP_KEY != '' }}
+        if: ${{ env.BOARD_APP_KEY_SET == 'true' }}
         continue-on-error: true
         with:
           # infra-commons-bot's client ID — a public identifier, not a credential; the private key

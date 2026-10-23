@@ -69,9 +69,14 @@ runs:
       with:
         python-version: "3.12"
 
+    # Hash-pinned, full transitive closure (infra-commons/meta#1775). Runs before the only step
+    # that is handed a secret. capture-findings-reusable.yml no longer maps any secret value
+    # into job env, so on a caller pinned at or after that change nothing installed here can
+    # read a credential. A caller on an older reusable pin still exposes the App key here
+    # until it bumps that pin.
     - name: Install dependencies
       shell: bash
-      run: pip install anthropic==0.49.0 httpx==0.28.1 pyyaml==6.0.2
+      run: pip install --require-hashes --no-deps -r "$GITHUB_ACTION_PATH/requirements.txt"
 
     - name: Capture findings from the merged diff
       shell: bash
