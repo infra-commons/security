@@ -100,10 +100,13 @@ jobs:
     # That exact mistake took capture-findings down in four repos for three hours on
     # 2026-08-13. Mapping the secrets to job-level env here is what makes the
     # credential-mode branch below expressible at all; do not "simplify" it back.
+    # Only PRESENCE is mapped, never the values (infra-commons/meta#1775): job env is
+    # readable by every later step, including the pip install. The mint step reads the
+    # key from `secrets.` in its own `with:`.
     env:
       CFG_APP_ID: ${{ secrets.clients_config_app_id }}
-      CFG_PRIVATE_KEY: ${{ secrets.clients_config_private_key }}
-      CFG_TOKEN: ${{ secrets.clients_config_token }}
+      CFG_PRIVATE_KEY_SET: ${{ secrets.clients_config_private_key != '' }}
+      CFG_TOKEN_SET: ${{ secrets.clients_config_token != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -115,10 +118,10 @@ jobs:
           CONFIG_REPO: ${{ inputs.config_repo }}
         run: |
           set -euo pipefail
-          if [ -n "$CFG_APP_ID" ] && [ -n "$CFG_PRIVATE_KEY" ]; then
+          if [ -n "$CFG_APP_ID" ] && [ "$CFG_PRIVATE_KEY_SET" = true ]; then
             echo "mode=app" >> "$GITHUB_OUTPUT"
             echo "Using a GitHub App installation token (minted per run)."
-          elif [ -n "$CFG_TOKEN" ]; then
+          elif [ "$CFG_TOKEN_SET" = true ]; then
             echo "mode=pat" >> "$GITHUB_OUTPUT"
             echo "::warning::Using the legacy stored PAT. A stored credential expires; prefer clients_config_app_id + clients_config_private_key."
           else
@@ -136,11 +139,12 @@ jobs:
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ env.CFG_APP_ID }}
-          private-key: ${{ env.CFG_PRIVATE_KEY }}
+          private-key: ${{ secrets.clients_config_private_key }}
           owner: ${{ steps.cred.outputs.owner }}
           # Narrower than the installation itself: this token can read only the
           # config repo, whatever else the App is installed on.
           repositories: ${{ steps.cred.outputs.repo }}
+          permission-contents: read
 
       # A skipped step's outputs are the empty string, so `||` falls through to the
       # legacy PAT without needing a second `if:` on this checkout.
@@ -149,6 +153,7 @@ jobs:
           repository: ${{ inputs.config_repo }}
           token: ${{ steps.cfgtoken.outputs.token || secrets.clients_config_token }}
           path: clients-config
+          persist-credentials: false
 
       - name: Install PyYAML
         run: pip install pyyaml==6.0.2
