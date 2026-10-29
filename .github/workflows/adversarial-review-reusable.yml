@@ -153,9 +153,14 @@ jobs:
     timeout-minutes: 20
     # Skip forks and Dependabot PRs — no secret access. The gate treats those
     # skips as acceptable; a skip on a normal PR blocks merge.
+    # "Dependabot PR" means BOTH the PR author and this run's actor are
+    # Dependabot. `github.actor` alone is whoever triggered the run, which a
+    # contributor can arrange to be Dependabot; the author alone would skip a
+    # human's push onto a Dependabot branch (infra-commons/meta#1778, M-actor).
     if: >-
       ${{ github.event.pull_request.head.repo.full_name == github.repository
-          && github.actor != 'dependabot[bot]' }}
+          && !(github.event.pull_request.user.login == 'dependabot[bot]'
+               && github.actor == 'dependabot[bot]') }}
     permissions:
       contents: read
       pull-requests: write
@@ -188,7 +193,8 @@ jobs:
     if: >-
       ${{ inputs.run-openai
           && github.event.pull_request.head.repo.full_name == github.repository
-          && github.actor != 'dependabot[bot]' }}
+          && !(github.event.pull_request.user.login == 'dependabot[bot]'
+               && github.actor == 'dependabot[bot]') }}
     permissions:
       contents: read
       pull-requests: write
@@ -340,7 +346,7 @@ jobs:
           openai-outcome: ${{ needs.openai.outputs.outcome }}
           run-openai: ${{ inputs.run-openai }}
           is-fork: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          is-dependabot: ${{ github.actor == 'dependabot[bot]' }}
+          is-dependabot: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]' }}
           quota-marker-open: ${{ steps.quota_marker.outputs.open }}
 
       # Opened on the FIRST quota-exhausted PR, which is the one the gate lets
