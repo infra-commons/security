@@ -172,8 +172,14 @@ jobs:
           OWNED_SLUGS: ${{ inputs.owned_slugs }}
           ALLOW_FILE: ${{ inputs.allow_file }}
           EXTRA_EXCLUDES: ${{ inputs.extra_exclude_paths }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        # cwd is the PR checkout, and a stdin script puts cwd first on sys.path,
+        # so a PR-added module would shadow `yaml` and run beside the denylist.
+        # -P drops that entry and -E ignores PYTHON* env (infra-commons/meta#1778,
+        # M-import). Not -I: it also drops user site-packages, where the pip
+        # install above may land, which would fail the guard closed everywhere.
         run: |
-          python3 << 'EOF'
+          python3 -E -P << 'EOF'
           import os
           import re
           import subprocess
@@ -285,9 +291,18 @@ jobs:
                           hits.append((rel, lineno, term, line.strip()[:160]))
 
           if hits:
+              # A public repo's logs and annotations are public, so printing the
+              # term would publish the very name this guard exists to keep out
+              # (infra-commons/meta#1779, L3). The line is enough to find it.
+              # Anything but an explicit "true" counts as public.
+              reveal = os.environ.get("REPO_PRIVATE", "") == "true"
               print("::error::Confidential customer/third-party terms found in tracked files.")
               for rel, lineno, term, snippet in hits:
-                  print(f"::error file={rel},line={lineno}::confidential term '{term}': {snippet}")
+                  if reveal:
+                      print(f"::error file={rel},line={lineno}::confidential term '{term}': {snippet}")
+                  else:
+                      print(f"::error file={rel},line={lineno}::confidential term "
+                            "(withheld: this repo's logs are public)")
               print(
                   f"\n{len(hits)} occurrence(s). Genericise the reference "
                   "(e.g. 'the client', 'the first customer', a neutral 'acme' slug), "
