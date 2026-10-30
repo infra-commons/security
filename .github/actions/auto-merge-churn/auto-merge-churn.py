@@ -3,10 +3,19 @@
 Evaluate a single PR for auto-merge-churn eligibility and, if eligible,
 approve it and enable native auto-merge.
 
-This is DETECTION + APPROVAL, not a merge itself: it only calls `gh pr review
---approve` and `gh pr merge --auto`, so the full required-check gauntlet
-(adversarial, legal, tests, pin-check) still gates the actual merge exactly
-as it does for a human-reviewed PR.
+This is DETECTION + APPROVAL, not a merge itself: it only approves the PR and
+calls `gh pr merge --auto`, so the full required-check gauntlet (adversarial,
+legal, tests, pin-check) still gates the actual merge exactly as it does for a
+human-reviewed PR.
+
+── Bound to the commit it evaluated ────────────────────────────────────────
+The approval names the head commit whose files were evaluated, and auto-merge
+is armed with `--match-head-commit` on that same SHA. A later push that makes
+the PR ineligible re-runs this script (callers trigger on `synchronize`), and
+it then REVOKES: it dismisses this action's own approvals and disables
+auto-merge. Without that, someone with write access could push arbitrary code
+onto an armed bot branch and it would merge on green (infra-commons/meta#1778,
+M-churn).
 
 ── Eligibility (ALL must hold) ─────────────────────────────────────────────
   1. PR author is in { rolliqdotcom, infra-commons-bot, dependabot[bot] }
@@ -172,6 +181,51 @@ def gh_json(*args):
     return json.loads(r.stdout)
 
 
+# Every approval this action posts starts with this, which is how a later run
+# recognises its own approvals to dismiss. A forged body only gets a review
+# dismissed, which can make a PR stricter but never looser.
+APPROVAL_PREFIX = "Auto-approved by auto-merge-churn"
+
+
+def revoke(repo: str, num: str, auto_merge_armed: bool) -> bool:
+    """Undo a previous run's approval and auto-merge on a PR that is no longer
+    eligible. Returns False if anything that should have been undone was not.
+    """
+    ok = True
+    reviews = gh_json("api", f"repos/{repo}/pulls/{num}/reviews?per_page=100")
+    ours = [
+        r for r in reviews
+        if r.get("state") == "APPROVED"
+        and (r.get("user") or {}).get("type") == "Bot"
+        and (r.get("body") or "").startswith(APPROVAL_PREFIX)
+    ]
+    for r in ours:
+        try:
+            subprocess.run(
+                ["gh", "api", "-X", "PUT",
+                 f"repos/{repo}/pulls/{num}/reviews/{r['id']}/dismissals",
+                 "-f", "message=auto-merge-churn: a later push made this PR "
+                       "ineligible; the earlier auto-approval no longer applies.",
+                 "-f", "event=DISMISS"],
+                capture_output=True, text=True, check=True)
+            print(f"  dismissed auto-approval {r['id']}")
+        except subprocess.CalledProcessError as exc:
+            print(f"  ERROR: could not dismiss approval {r['id']}: "
+                  f"{exc.stderr.strip()[:120]}", file=sys.stderr)
+            ok = False
+    if auto_merge_armed:
+        try:
+            subprocess.run(
+                ["gh", "pr", "merge", num, "--repo", repo, "--disable-auto"],
+                capture_output=True, text=True, check=True)
+            print("  auto-merge disabled")
+        except subprocess.CalledProcessError as exc:
+            print(f"  ERROR: could not disable auto-merge: {exc.stderr.strip()[:120]}",
+                  file=sys.stderr)
+            ok = False
+    return ok
+
+
 def main() -> None:
     repo = os.environ["GH_REPO"]
     num = os.environ["PR_NUMBER"]
@@ -185,30 +239,43 @@ def main() -> None:
         print(f"auto-merge-churn: NO-OP — {early.reason}")
         return
 
-    data = gh_json("pr", "view", num, "--repo", repo, "--json", "files,labels")
+    # Files and head SHA from ONE read, so the SHA approved is the SHA whose
+    # files were evaluated.
+    data = gh_json("pr", "view", num, "--repo", repo,
+                   "--json", "files,labels,headRefOid,autoMergeRequest")
     files = [f["path"] for f in data.get("files", [])]
     labels = [lbl["name"] for lbl in data.get("labels", [])]
+    head_sha = data.get("headRefOid") or ""
 
     decision = decide(repo, author, files, labels, extra)
+    if decision.eligible and not head_sha:
+        decision = Decision(False, "no head commit reported")
     if not decision.eligible:
-        print(f"auto-merge-churn: NO-OP — {decision.reason}")
+        print(f"auto-merge-churn: NOT ELIGIBLE — {decision.reason}; revoking any "
+              "earlier auto-approval")
+        if not revoke(repo, num, bool(data.get("autoMergeRequest"))):
+            sys.exit(1)
         return
 
-    print(f"auto-merge-churn: ELIGIBLE ({decision.basis}) — approving #{num} in {repo}")
+    print(f"auto-merge-churn: ELIGIBLE ({decision.basis}) — approving #{num} "
+          f"@ {head_sha[:12]} in {repo}")
 
-    # Approve (satisfies reviews:1; bot != PR author so it counts).
+    # Approve (satisfies reviews:1; bot != PR author so it counts). REST rather
+    # than `gh pr review`, which cannot name the commit being approved.
     approved = False
     try:
         subprocess.run(
-            ["gh", "pr", "review", num, "--repo", repo, "--approve", "--body",
-             f"Auto-approved by auto-merge-churn ({decision.basis}). "
-             f"Required checks still gate the merge. Run: {run_url}"],
+            ["gh", "api", "-X", "POST", f"repos/{repo}/pulls/{num}/reviews",
+             "-f", "event=APPROVE", "-f", f"commit_id={head_sha}",
+             "-f", f"body={APPROVAL_PREFIX} ({decision.basis}) at {head_sha}. "
+                   f"Required checks still gate the merge. Run: {run_url}"],
             capture_output=True, text=True, check=True)
         print("  approved")
         approved = True
     except subprocess.CalledProcessError as exc:
         err = (exc.stderr or "").lower()
-        if "already" in err or "can't approve" in err or "cannot approve" in err:
+        if ("already" in err or "can't approve" in err or "cannot approve" in err
+                or "can not approve" in err):
             print("  already approved")
             approved = True
         else:
@@ -230,10 +297,12 @@ def main() -> None:
               "auto-merge OFF so the manual bypass button stays available. Approved only.")
         return
 
-    # Enable native auto-merge — merges only once required checks pass.
+    # Enable native auto-merge — merges only once required checks pass, and
+    # only if the head is still the commit evaluated above.
     try:
         subprocess.run(
-            ["gh", "pr", "merge", num, "--repo", repo, "--auto", "--squash"],
+            ["gh", "pr", "merge", num, "--repo", repo, "--auto", "--squash",
+             "--match-head-commit", head_sha],
             capture_output=True, text=True, check=True)
         print("  auto-merge enabled (squash)")
     except subprocess.CalledProcessError as exc:
