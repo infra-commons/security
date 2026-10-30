@@ -92,8 +92,17 @@ jobs:
     # Dependabot-triggered pull_request runs (clients_config_token would be
     # empty, tripping the fail-closed check below), and Dependabot PRs only
     # ever touch dependency/workflow-pin lines — no risk of a confidential
-    # term slipping in.
-    if: ${{ !github.event.pull_request.draft && github.actor != 'dependabot[bot]' }}
+    # term slipping in. A "Dependabot PR" is one whose AUTHOR is Dependabot and
+    # whose run Dependabot triggered: `github.actor` alone is whoever triggered
+    # the run, which a contributor can arrange to be Dependabot, and the author
+    # alone would skip a human's push onto a Dependabot branch
+    # (infra-commons/meta#1778, M-actor). A Dependabot-triggered push event has
+    # no pull_request and keeps the old skip.
+    if: >-
+      ${{ !github.event.pull_request.draft
+          && !(github.actor == 'dependabot[bot]'
+               && (github.event.pull_request == null
+                   || github.event.pull_request.user.login == 'dependabot[bot]')) }}
     # `secrets` is NOT a context GitHub permits in a step-level `if:`. Written that
     # way the WHOLE WORKFLOW fails validation before it starts — zero check-runs, no
     # logs, and `gh run list` shows the file path where the workflow name should be.

@@ -214,43 +214,126 @@ def _set_main_env(monkeypatch, repo=REPO, num="1", author=BOT, run_url="http://r
     monkeypatch.delenv("ALLOWED_GLOBS", raising=False)
 
 
-def test_main_does_not_enable_auto_merge_when_approve_fails(monkeypatch):
-    _set_main_env(monkeypatch)
-    monkeypatch.setattr(churn, "gh_json",
-                        lambda *a: {"files": [{"path": ALLOWED_FILE}], "labels": []})
+HEAD = "a" * 40
 
+
+class _Ok:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def _is_approve(cmd):
+    return cmd[:2] == ["gh", "api"] and "event=APPROVE" in cmd
+
+
+def _view(files, *, head=HEAD, armed=None, reviews=()):
+    def gh_json(*args):
+        if args[:2] == ("pr", "view"):
+            return {"files": [{"path": f} for f in files], "labels": [],
+                    "headRefOid": head, "autoMergeRequest": armed}
+        if args[0] == "api":
+            return list(reviews)
+        raise AssertionError(f"unexpected gh_json: {args}")
+    return gh_json
+
+
+def _record(monkeypatch, fail=lambda cmd: False, stderr="HTTP 403"):
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        if cmd[:3] == ["gh", "pr", "review"]:
-            raise churn.subprocess.CalledProcessError(
-                1, cmd, output="", stderr="HTTP 403: token lacks approve permission")
-        raise AssertionError(f"must not reach: {cmd}")
+        if fail(cmd):
+            raise churn.subprocess.CalledProcessError(1, cmd, output="", stderr=stderr)
+        return _Ok()
 
     monkeypatch.setattr(churn.subprocess, "run", fake_run)
+    return calls
+
+
+def test_main_does_not_enable_auto_merge_when_approve_fails(monkeypatch):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json", _view([ALLOWED_FILE]))
+    calls = _record(monkeypatch, fail=_is_approve,
+                    stderr="HTTP 403: token lacks approve permission")
     churn.main()
     assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd in calls)
 
 
-@pytest.mark.parametrize("stderr", ["already approved", "you can't approve your own PR"])
+@pytest.mark.parametrize("stderr", ["already approved", "you can't approve your own PR",
+                                    "Can not approve your own pull request"])
 def test_main_still_enables_auto_merge_when_already_approved(monkeypatch, stderr):
     _set_main_env(monkeypatch)
-    monkeypatch.setattr(churn, "gh_json",
-                        lambda *a: {"files": [{"path": ALLOWED_FILE}], "labels": []})
-
-    calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        if cmd[:3] == ["gh", "pr", "review"]:
-            raise churn.subprocess.CalledProcessError(1, cmd, output="", stderr=stderr)
-        class R:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-        return R()
-
-    monkeypatch.setattr(churn.subprocess, "run", fake_run)
+    monkeypatch.setattr(churn, "gh_json", _view([ALLOWED_FILE]))
+    calls = _record(monkeypatch, fail=_is_approve, stderr=stderr)
     churn.main()
     assert any(cmd[:3] == ["gh", "pr", "merge"] for cmd in calls)
+
+
+# ── main(): approval and auto-merge are bound to the evaluated head ─────────────
+#
+# infra-commons/meta#1778 (M-churn): an approval with no commit and an `--auto`
+# with no `--match-head-commit` let anyone with write access push arbitrary code
+# onto an armed bot branch after the fact. A later push that makes the PR
+# ineligible must also UNDO the earlier approval and auto-merge — a NO-OP there
+# leaves the PR armed for whatever was pushed.
+
+def _approval(rid, *, body=churn.APPROVAL_PREFIX + " (x)", user_type="Bot", state="APPROVED"):
+    return {"id": rid, "state": state, "body": body, "user": {"type": user_type}}
+
+
+def test_the_evaluated_head_is_approved_and_is_the_only_head_that_can_merge(monkeypatch):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json", _view([ALLOWED_FILE]))
+    calls = _record(monkeypatch)
+    churn.main()
+    approve = next(c for c in calls if _is_approve(c))
+    assert f"commit_id={HEAD}" in approve
+    merge = next(c for c in calls if c[:3] == ["gh", "pr", "merge"])
+    assert merge[merge.index("--match-head-commit") + 1] == HEAD
+
+
+def test_no_reported_head_is_never_approved(monkeypatch):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json", _view([ALLOWED_FILE], head=""))
+    calls = _record(monkeypatch)
+    churn.main()
+    assert not any(_is_approve(c) for c in calls)
+    assert not any("--auto" in c for c in calls)
+
+
+def test_a_later_ineligible_push_dismisses_our_approvals_and_disables_auto_merge(monkeypatch):
+    _set_main_env(monkeypatch)
+    reviews = [
+        _approval(1),                                   # ours: dismissed
+        _approval(2, body="LGTM"),                      # a human's words: kept
+        _approval(3, user_type="User"),                 # a human quoting us: kept
+        _approval(4, state="DISMISSED"),                # already gone: kept
+    ]
+    monkeypatch.setattr(churn, "gh_json",
+                        _view(["src/app.py"], armed={"enabledAt": "x"}, reviews=reviews))
+    calls = _record(monkeypatch)
+    churn.main()
+    dismissed = [c for c in calls if any(a.endswith("/dismissals") for a in c)]
+    assert [c[4] for c in dismissed] == [f"repos/{REPO}/pulls/1/reviews/1/dismissals"]
+    assert any("--disable-auto" in c for c in calls)
+    assert not any(_is_approve(c) for c in calls)
+
+
+def test_an_ineligible_pr_with_nothing_to_revoke_makes_no_write(monkeypatch):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json", _view(["src/app.py"]))
+    calls = _record(monkeypatch)
+    churn.main()
+    assert calls == []
+
+
+@pytest.mark.parametrize("failing", ["/dismissals", "--disable-auto"])
+def test_a_revoke_that_fails_exits_non_zero(monkeypatch, failing):
+    _set_main_env(monkeypatch)
+    monkeypatch.setattr(churn, "gh_json",
+                        _view(["src/app.py"], armed={"enabledAt": "x"}, reviews=[_approval(1)]))
+    _record(monkeypatch, fail=lambda cmd: any(failing in a for a in cmd))
+    with pytest.raises(SystemExit) as exc:
+        churn.main()
+    assert exc.value.code == 1
