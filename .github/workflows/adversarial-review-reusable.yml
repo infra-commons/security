@@ -169,7 +169,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # adversarial-review/v1.19.0
+        uses: infra-commons/security/.github/actions/adversarial-review@15e5a944f138c3028ffe0c75048718b6e3865560 # adversarial-review/v1.20.0
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -203,7 +203,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # adversarial-review/v1.19.0
+        uses: infra-commons/security/.github/actions/adversarial-review@15e5a944f138c3028ffe0c75048718b6e3865560 # adversarial-review/v1.20.0
         with:
           provider: ${{ inputs.second-opinion-provider }}
           # THE SECOND ARM IS A FULL CONDITION, NOT A BARE FALLBACK, and that is the whole
@@ -336,7 +336,7 @@ jobs:
       # claude-sonnet-5-5, and `stop_reason == "refusal"` now fails the review).
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@6a000009d5571c5e923e9f0c16e2d1214eddf9ed # = adversarial-review/v1.19.0
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@15e5a944f138c3028ffe0c75048718b6e3865560 # = adversarial-review/v1.20.0
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
