@@ -161,7 +161,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-    uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@1ecab6b6050c2d38ff606de8c9db66222a3c9193 # adversarial-review composites = v1.19.0 (#169)
+    uses: infra-commons/security/.github/workflows/adversarial-review-reusable.yml@e7751aec94c4c124a7f71f73834cda7e7f676f98 # adversarial-review composites = v1.19.0 (#169)
     with:
       run-openai: ${{ inputs.run_openai }}
     secrets:
