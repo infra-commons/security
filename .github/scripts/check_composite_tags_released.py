@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 `check-action-pins.sh` deliberately exempts this repo's own composite actions
-from the SHA-pin rule, because each composite ships fixes by *moving* its
+from the SHA-pin rule outside reusables (meta#1779), and each family ships by *moving* its
 `<family>/v1` tag (see README, "Reusables' internal composite pins"). That
 exemption is what makes the release possible; nothing checked that the release
 actually happened.
@@ -83,9 +83,10 @@ _USES_RE = re.compile(
     + r"/(?P<family>[A-Za-z0-9._-]+)"
     r"@(?P<tag>[A-Za-z0-9._/-]+)"
 )
-# Only moving major tags are our release mechanism. A raw SHA pin is somebody
-# deliberately opting out, and is not this check's business.
+# Only moving major tags count as discovery pins. Inside a reusable every own-composite
+# ref is a raw SHA (infra-commons/meta#1779); those are checked by `lagging_inner_pins`.
 _MOVING_TAG_RE = re.compile(r"^[A-Za-z0-9._-]+/v\d+$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _redact(text: str) -> str:
@@ -213,6 +214,40 @@ def tree_at(ref: str, path: str, root: Path) -> str | None:
         return None
 
 
+def lagging_inner_pins(family: str, root: Path) -> list[str]:
+    """Own-composite SHA pins in this family's reusable that do not deliver HEAD's composite.
+
+    A pin cannot name its own commit, so a composite change lands first and a follow-up PR
+    bumps the pin (infra-commons/meta#1779). Until then, releasing the family would ship the
+    old composite under a new version. An off-main SHA is the pre-merge hazard.
+    """
+    path = root / reusable_path(family)
+    if not path.is_file():
+        return []
+    problems: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        match = _USES_RE.search(line)
+        if not match or not _SHA_RE.match(match.group("tag")):
+            continue
+        composite, sha = match.group("family"), match.group("tag")
+        action = f"{ACTIONS_DIR}/{composite}"
+        try:
+            git("merge-base", "--is-ancestor", sha, "HEAD", cwd=root, quiet=True)
+            on_main = True
+        except subprocess.CalledProcessError:
+            on_main = False
+        if not on_main or tree_at(sha, action, root) != tree_at("HEAD", action, root):
+            reason = "is not an ancestor of HEAD" if not on_main else "carries an older composite than HEAD"
+            problems.append(
+                f"{family}: {reusable_path(family)} pins `{composite}` at {sha[:12]}, which "
+                f"{reason}. Repoint it to a main commit carrying HEAD's {action} in a PR, "
+                f"then release."
+            )
+    return sorted(set(problems))
+
+
 def surface_hashes(ref: str, family: str, root: Path, paths: list[str]) -> dict:
     """path -> content hash at `ref`, None where the path is absent there."""
     return {path: tree_at(ref, path, root) for path in paths}
@@ -304,6 +339,8 @@ def main() -> int:
     }
 
     stale, errors = evaluate(pins, head_trees, tag_trees)
+    for family in sorted(pins):
+        errors.extend(lagging_inner_pins(family, root))
 
     for family in stale:
         differing = sorted(

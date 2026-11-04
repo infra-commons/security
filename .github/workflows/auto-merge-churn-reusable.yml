@@ -124,12 +124,10 @@ jobs:
           app-id: ${{ secrets.approve_app_id }}
           private-key: ${{ secrets.approve_app_private_key }}
 
-      # Wrapped as a composite (pinned to the auto-merge-churn/v1 moving tag, not a
-      # raw SHA — see README's "per-family moving tags" section) so a fix to the
-      # eligibility logic ships by moving that tag, matching every other reusable
-      # in this repo (capture-findings, daily-health-check, weekly-security-scan,
-      # suppression-audit). No reusable/consumer edit needed to pick up a fix.
-      - uses: infra-commons/security/.github/actions/auto-merge-churn@auto-merge-churn/v1
+      # Wrapped as a composite, SHA-pinned like every own-composite ref inside a reusable
+      # (infra-commons/meta#1779; README "Reusables' internal composite pins"). A fix to the
+      # eligibility logic ships by bumping this SHA in a PR, then releasing.
+      - uses: infra-commons/security/.github/actions/auto-merge-churn@e7751aec94c4c124a7f71f73834cda7e7f676f98 # auto-merge-churn/v1 (v1.4.0)
         with:
           # App token (can approve) when configured; otherwise GITHUB_TOKEN, which
           # can read/enable-auto-merge but fails soft on the approve.

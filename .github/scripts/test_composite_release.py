@@ -71,7 +71,21 @@ def test_this_repo_still_has_pins_to_check():
     """
     pins = check.discover_pins(REPO_ROOT)
     assert pins, "no own-composite moving-tag pins discovered in this repo"
-    assert "capture-findings" in pins
+    # meta#1779 SHA-pinned every composite ref inside reusables. suppression-audit
+    # owns no reusable, so this non-reusable workflow's moving-tag pin is the only
+    # thing keeping it in the release set. Losing it would drop the family silently.
+    assert pins.get("suppression-audit") == "suppression-audit/v1"
+
+
+def test_every_action_family_is_still_discovered():
+    """SHA-pinning a family's only `uses:` drops it from discovery (how #95 orphaned the gate)."""
+    if not check.git("tag", "--list", "*/v1", cwd=REPO_ROOT, quiet=True):
+        import pytest
+        pytest.skip("no tags in this checkout")
+    found = check.discover_families(REPO_ROOT)
+    actions = [p.name for p in (REPO_ROOT / check.ACTIONS_DIR).iterdir() if p.is_dir()]
+    missing = [f for f in actions if f not in found and f != "adversarial-review-gate"]
+    assert not missing, f"composite families no longer released: {missing}"
 
 
 # ── every released family is actually tested ──────────────────────────────────
@@ -497,3 +511,73 @@ def test_a_version_already_at_the_tip_is_reused_not_recut(tmp_path, monkeypatch)
     assert _run(monkeypatch, root, tip, lambda *_: True) == 0
     assert check.git("rev-parse", "fam/v1^{commit}", cwd=root) == tip
     assert not check.git("tag", "--list", "fam/v1.2.0", cwd=root)
+
+
+# ── composite SHA pins inside reusables (infra-commons/meta#1779) ─────────────
+
+
+def _commit(root: Path, msg: str) -> str:
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", msg], cwd=root, check=True)
+    return check.git("rev-parse", "HEAD", cwd=root)
+
+
+def _pinned_family(tmp_path: Path, pin_side_commit: bool = False) -> tuple[Path, str]:
+    """fam composite at M1, reusable pinning M1 (or an off-main commit)."""
+    root = _git_repo(tmp_path)
+    _write(root, ".github/actions/fam/action.yml", "name: fam\n# v1\n")
+    sha = _commit(root, "composite v1")
+    if pin_side_commit:
+        subprocess.run(["git", "checkout", "-qb", "side"], cwd=root, check=True)
+        _write(root, "g", "y")
+        sha = _commit(root, "side")
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=root, check=True)
+    _write(root, ".github/workflows/fam-reusable.yml",
+           f"on: workflow_call\n      - uses: infra-commons/security/.github/actions/fam@{sha} # x\n")
+    _commit(root, "pin")
+    return root, sha
+
+
+def test_inner_pin_lag_is_detected_and_cleared_by_a_bump(tmp_path):
+    root, _m1 = _pinned_family(tmp_path)
+    assert check.lagging_inner_pins("fam", root) == []
+    _write(root, ".github/actions/fam/action.yml", "name: fam\n# v2\n")
+    m2 = _commit(root, "composite v2, no pin bump")
+    lag = check.lagging_inner_pins("fam", root)
+    assert len(lag) == 1 and "older composite" in lag[0]
+    _write(root, ".github/workflows/fam-reusable.yml",
+           f"on: workflow_call\n      - uses: infra-commons/security/.github/actions/fam@{m2} # x\n")
+    _commit(root, "bump pin")
+    assert check.lagging_inner_pins("fam", root) == []
+
+
+def test_an_off_main_inner_pin_is_lagging(tmp_path):
+    root, _ = _pinned_family(tmp_path, pin_side_commit=True)
+    lag = check.lagging_inner_pins("fam", root)
+    assert len(lag) == 1 and "not an ancestor" in lag[0]
+
+
+def test_the_releaser_refuses_a_lagging_family_and_releases_its_sibling(tmp_path, monkeypatch, capsys):
+    root, _ = _pinned_family(tmp_path)
+    _write(root, ".github/workflows/depbot-reusable.yml", "on: workflow_call\n# v1\n")
+    _commit(root, "depbot")
+    for tag in ("fam/v1", "depbot/v1"):
+        subprocess.run(["git", "tag", tag], cwd=root, check=True)
+    _write(root, ".github/actions/fam/action.yml", "name: fam\n# v2\n")
+    _write(root, ".github/workflows/depbot-reusable.yml", "on: workflow_call\n# v2\n")
+    _commit(root, "composite v2, no pin bump")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(root))
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.delenv("TRIGGER_SHA", raising=False)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    assert release.main() == 1
+    out = capsys.readouterr().out
+    assert "releasing depbot/v1.0.0" in out and "releasing fam/" not in out and "Repoint it" in out
+
+
+def test_pin_check_refuses_a_moving_tag_composite_only_inside_a_reusable(tmp_path):
+    script = REPO_ROOT / ".github/scripts/check-action-pins.sh"
+    moving = "      - uses: infra-commons/security/.github/actions/fam@fam/v1\n"
+    for on, expected in (("on:\n  workflow_call:\n", 1), ("on:\n  schedule: []\n", 0)):
+        _write(tmp_path, ".github/workflows/w.yml", on + "jobs:\n  a:\n    steps:\n" + moving)
+        assert subprocess.run(["bash", str(script)], cwd=tmp_path, capture_output=True).returncode == expected

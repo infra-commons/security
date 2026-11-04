@@ -117,51 +117,18 @@ Every degraded path is reported to stderr *and* the job summary, naming the cred
 that was refused — a run that ingested nothing says so. Set `ingest_pr_reviews: false` to
 turn the ingest off and restore the previous single-source behaviour.
 
-#### Reusables' internal composite pins — per-family moving tags, not raw SHAs
+#### Reusables' internal composite pins — commit SHAs (infra-commons/meta#1779)
 
-Unlike every other `uses:` in this repo, each reusable's own composite-action pin is
-pinned to a **per-family moving major tag** rather than a 40-char SHA:
-
-| Composite | Moving pin |
-|---|---|
-| `.github/actions/auto-merge-churn` | `@auto-merge-churn/v1` |
-| `.github/actions/capture-findings` | `@capture-findings/v1` |
-| `.github/actions/daily-health-check` | `@daily-health-check/v1` |
-| `.github/actions/suppression-audit` | `@suppression-audit/v1` |
-| `.github/actions/weekly-security-scan` | `@weekly-security-scan/v1` |
-
-**Exception: `adversarial-review` and `adversarial-review-gate`.** These two used to be in
-this table too, until infra-commons/security#95: a caller's SHA pin on
-`adversarial-review-reusable.yml` only fixes the orchestration file if the composites it
-calls are *also* pinned, since the moving tag re-resolves identically for every caller and
-every pin, including one from years ago. Both `uses:` lines inside that reusable are now
-pinned to commit SHAs instead — see its own header comment for the full rationale and the
-manual bump procedure. `release-composites.yml` still cuts `adversarial-review/vX.Y.Z`
-immutable release tags (useful as the SHA source for the next bump) but no longer delivers
-either composite via a moving tag *at that ref or later*.
-
-That qualifier is load-bearing, not pedantry. A caller pins the **reusable**, so a caller
-pinned at a pre-#95 ref still runs a copy of that file whose composite `uses:` lines are
-moving tags, and still resolves them at run time. Measured 2026-09-04 across the fleet,
-one caller is in exactly that state — the reusable's own header names it. So both moving
-tags are still live refs, and `adversarial-review-gate/v1` in particular is now released
-by nothing and verified by nothing: it owns no `<family>-reusable.yml` to be discovered by
-name, and its only `uses:` is a SHA pin that `discover_pins()` ignores by design, so it
-falls out of both halves of the mechanism described below.
-
-`pin-check.yml` carries a narrow, deliberate exception for own-repo `.github/actions/*`
-refs on a `<family>/vN` tag (see `.github/scripts/check-action-pins.sh`); our own
-*reusable-workflow* calls and every third-party `uses:` still require an immutable SHA.
-These are the internal pins we own end-to-end, so the risk a SHA pin protects against
-(a third party rewriting history under us) doesn't apply.
-
-**To ship a composite fix: merge it, then approve the release.**
-`release-composites.yml` cuts the immutable `<family>/vX.Y.Z` release tag and moves
-`<family>/v1` for you, on `main`, once the `Tests` workflow passes — but the `release` job
-runs in the `fleet-release` environment, which requires a reviewer, so it waits in
-*Waiting* until a human approves it. There are **zero** edits to the reusable or any
-consumer, and no manual tag step. Every caller that pins the reusable at a post-adoption
-SHA (or `@main`) picks up the fix on its next run *after that approval*.
+Every own-composite `uses:` inside a reusable is a 40-char SHA with a `# <family>/vN (vX.Y.Z)`
+comment, so a caller's SHA pin on the reusable also fixes the composite it runs.
+`pin-check.yml` fails a moving-tag composite ref in any `workflow_call` file. The tag form
+survives only in non-reusable workflows here (`audit-canonical-suppressions.yml`, which is
+also what keeps `suppression-audit` discoverable). `<family>/v1` tags still move, delivering a
+reusable plus the composite SHA it pins. **To ship a composite fix:** merge it (M1). Its
+release run refuses each family whose reusable pins an older composite (`lagging_inner_pins`),
+releases the rest and exits 1. PR the pin bump to M1: the comment names the matching release,
+or `# main@<sha7> (security#N)` if none is cut yet. Merge it, then approve the `fleet-release`
+run, which waits in *Waiting* for a reviewer. Callers then repin their reusable SHA.
 
 The approval is the only deliberate act left on this path, which is why it exists. These
 tags reach 13+ repos' merge gates with no per-caller pin bump to review them, and
