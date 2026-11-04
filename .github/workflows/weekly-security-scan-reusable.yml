@@ -221,9 +221,31 @@ jobs:
           esac
           echo "trivy_severity=$list" >> "$GITHUB_OUTPUT"
 
+      # Install Trivy from its GitHub release, sha256-pinned, instead of via
+      # setup-trivy: setup-trivy's install.sh downloads the binary from get.trivy.dev,
+      # which stopped resolving on 2026-11-03 (curl exit 6 on every binary-cache miss).
+      # Checksums copied from the release's trivy_0.70.0_checksums.txt (they match the
+      # assets' GitHub digests). Same Trivy version trivy-action v0.36.0 defaults to.
+      - name: Install Trivy v0.70.0 (GitHub release, sha256-verified)
+        run: |
+          set -euo pipefail
+          v=0.70.0
+          case "$(uname -m)" in
+            x86_64)  a=Linux-64bit; sha=8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9 ;;
+            aarch64) a=Linux-ARM64; sha=2f6bb988b553a1bbac6bdd1ce890f5e412439564e17522b88a4541b4f364fc8d ;;
+            *) echo "::error::unsupported runner arch $(uname -m)"; exit 1 ;;
+          esac
+          tgz="$RUNNER_TEMP/trivy_${v}_${a}.tar.gz"; dir="$RUNNER_TEMP/trivy-bin"
+          curl -fsSL --retry 3 -o "$tgz" "https://github.com/aquasecurity/trivy/releases/download/v${v}/trivy_${v}_${a}.tar.gz"
+          echo "${sha}  ${tgz}" | sha256sum -c -
+          mkdir -p "$dir" && tar -xzf "$tgz" -C "$dir" trivy
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/trivy" --version
+
       - name: Trivy — filesystem scan (JSON)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true  # installed by the step above
           scan-type: fs
           scan-ref: .
           severity: ${{ steps.sev.outputs.trivy_severity }}
@@ -247,6 +269,7 @@ jobs:
       - name: Trivy — image scan (JSON)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          skip-setup-trivy: true  # installed by the step above
           scan-type: image
           image-ref: security-scan-target:latest
           severity: ${{ steps.sev.outputs.trivy_severity }}
