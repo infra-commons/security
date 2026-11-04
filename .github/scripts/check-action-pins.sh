@@ -8,12 +8,9 @@
 # them. This guard keeps every internal reference SHA-pinned so a caller's pin is real.
 #
 # Allowed without a SHA: local `./` refs, digest-pinned `docker://...@sha256:` images, and
-# own-repo *composite-action* refs pinned to a per-family `<family>/vN...` moving tag
-# (e.g. `.github/actions/capture-findings@capture-findings/v1`) — the one deliberate,
-# scoped relaxation: each of those composites ships fixes by moving its `<family>/v1`
-# tag (see README), so its internal pin is intentionally NOT a raw SHA. Note this exempts
-# only `.github/actions/*` refs; our own *reusable-workflow* calls still require a 40-char
-# SHA, as does every third-party and cross-repo `uses:`.
+# own-repo *composite-action* refs on a per-family `<family>/vN` moving tag, but ONLY in a
+# workflow that is not a reusable (no `workflow_call:`), which no caller pins. Inside a
+# reusable it must be a SHA (infra-commons/meta#1779; see lagging_inner_pins).
 #
 # `adversarial-review` and `adversarial-review-gate` are explicitly EXCLUDED from that
 # relaxation (infra-commons/security#95): they used to ship the same way, but a caller's
@@ -36,7 +33,14 @@ while IFS= read -r raw; do
       viol=$((viol + 1))
       continue
       ;;
-    infra-commons/security/.github/actions/*@*/v[0-9]*) continue ;;
+    infra-commons/security/.github/actions/*@*/v[0-9]*)
+      # Inside a reusable a moving tag defeats the caller's SHA pin (meta#1779).
+      if grep -qE '^[[:space:]]*workflow_call:' "$file"; then
+        echo "::error file=$file,line=$lineno::'$ref' pins an own composite by moving tag inside a reusable — pin to a 40-char commit SHA with a '# <family>/vN (vX.Y.Z)' comment (infra-commons/meta#1779)"
+        viol=$((viol + 1))
+      fi
+      continue
+      ;;
     *@*)
       tail="${ref##*@}"
       if ! printf '%s' "$tail" | grep -qE '^[0-9a-f]{40}$'; then

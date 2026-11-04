@@ -61,6 +61,7 @@ from check_composite_tags_released import (  # noqa: E402
     discover_families,
     discover_pins,
     git,
+    lagging_inner_pins,
     surface_hashes,
     surface_paths,
     tree_at,
@@ -187,8 +188,18 @@ def main() -> int:
         return 1
 
     released: list[str] = []
+    blocked: list[str] = []
     deferred = False
     for family, moving_tag in sorted(pins.items()):
+        # A reusable whose composite SHA pin lags HEAD must not be released: the new
+        # version would run the old composite (infra-commons/meta#1779). Skip it, release
+        # the rest, and fail at the end so the needed pin bump is reported.
+        lagging = lagging_inner_pins(family, root)
+        if lagging:
+            for line in lagging:
+                print(f"::error::{line}")
+            blocked.append(family)
+            continue
         paths = surface_paths(family, root)
         head_tree = surface_hashes("HEAD", family, root, paths)
         tag_tree = surface_hashes(moving_tag, family, root, paths)
@@ -258,12 +269,14 @@ def main() -> int:
         lines = ["### Composites released", "", "None. main moved; deferred to the newer run."]
     else:
         lines = ["### Composites released", "", "None. Every moving tag already matched `main`."]
+    if blocked:
+        lines += ["", "Not released, composite SHA pin behind HEAD: " + ", ".join(f"`{f}`" for f in blocked)]
     print("\n".join(lines))
     if summary:
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
 
-    return 0
+    return 1 if blocked else 0
 
 
 if __name__ == "__main__":

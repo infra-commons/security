@@ -133,7 +133,7 @@ jobs:
           app-id:      ${{ secrets.approve_app_id }}
           private-key: ${{ secrets.approve_app_private_key }}
 
-      - uses: infra-commons/security/.github/actions/daily-health-check@daily-health-check/v1
+      - uses: infra-commons/security/.github/actions/daily-health-check@15e5a944f138c3028ffe0c75048718b6e3865560 # daily-health-check/v1 (v1.10.0)
         with:
           github-token:      ${{ github.token }}
           # Used ONLY to approve Dependabot PRs (github.token cannot). Empty when

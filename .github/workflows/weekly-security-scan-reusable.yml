@@ -278,7 +278,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@15e5a944f138c3028ffe0c75048718b6e3865560 # weekly-security-scan/v1 (v1.13.0)
         with:
           mode: ai-review
           scan-chunk: app
@@ -402,7 +402,7 @@ jobs:
           path: _repos/secrets
           persist-credentials: false
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@15e5a944f138c3028ffe0c75048718b6e3865560 # weekly-security-scan/v1 (v1.13.0)
         with:
           mode: ai-review
           scan-chunk: infra
@@ -524,7 +524,7 @@ jobs:
           path: _repos/secrets
           persist-credentials: false
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@15e5a944f138c3028ffe0c75048718b6e3865560 # weekly-security-scan/v1 (v1.13.0)
         with:
           mode: ai-review
           scan-chunk: cicd
@@ -667,7 +667,7 @@ jobs:
           path: _artifacts/gitleaks
         continue-on-error: true
 
-      - uses: infra-commons/security/.github/actions/weekly-security-scan@weekly-security-scan/v1
+      - uses: infra-commons/security/.github/actions/weekly-security-scan@15e5a944f138c3028ffe0c75048718b6e3865560 # weekly-security-scan/v1 (v1.13.0)
         with:
           mode: create-issues
           github-token: ${{ github.token }}
@@ -702,7 +702,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: infra-commons/security/.github/actions/suppression-audit@suppression-audit/v1
+      - uses: infra-commons/security/.github/actions/suppression-audit@95a7fcf7b8b4a6c6777074e996466aefd9fb7bde # suppression-audit/v1 (v1.1.0)
         with:
           github-token: ${{ github.token }}
           repo: ${{ github.repository }}
