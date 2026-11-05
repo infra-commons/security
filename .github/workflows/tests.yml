@@ -225,3 +225,21 @@ jobs:
         # `Set up job`, delivered through a moving tag with no caller PR to catch it.
         # The two checks are a pair, not a duplication: workflows there, manifests here.
         run: python -m pytest .github/scripts -q
+
+  cve-watch:
+    name: cve-watch unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # stdlib-only; the tests fake every feed.
+        run: pip install pytest==8.3.4
+
+      - name: Run tests
+        run: python -m pytest cve-watch -q
