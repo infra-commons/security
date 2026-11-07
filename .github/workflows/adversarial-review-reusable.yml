@@ -203,7 +203,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@02bcde94db81b33fc34407de989174c750428697 # main@02bcde9 (security#183)
+        uses: infra-commons/security/.github/actions/adversarial-review@854f26853149f0202138539872f87571ffb5d0de # CANARY meta#1873 — reverted before merge
         with:
           provider: ${{ inputs.second-opinion-provider }}
           # THE SECOND ARM IS A FULL CONDITION, NOT A BARE FALLBACK, and that is the whole
