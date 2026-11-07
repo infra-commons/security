@@ -126,7 +126,7 @@ on:
         default: false
       second-opinion-provider:
         description: >-
-          Which provider fills the second-opinion slot — `openai` (gpt-5.6-terra, direct API,
+          Which provider fills the second-opinion slot — `openai` (gpt-6.1-terra, direct API,
           needs OPENAI_API_KEY) or `openrouter` (DeepSeek V4 Pro, needs OPENROUTER_API_KEY).
           Defaults to `openai`, so a caller that does not set it resolves exactly what it
           resolves today. The model, endpoint and blocking scope for each live in

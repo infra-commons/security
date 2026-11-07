@@ -10,7 +10,7 @@ Runs an adversarial AI security review on every PR diff. Supports two independen
 
 - **Claude** (Anthropic, `claude-sonnet-5-5`) — always runs.
 - **A second opinion** — optional; enabled per-caller with `run-openai: true`, and the provider that fills the slot is chosen with `second-opinion-provider`:
-  - `openai` (default) — `gpt-5.6-terra` on OpenAI's direct API. Requires `OPENAI_API_KEY`.
+  - `openai` (default) — `gpt-6.1-terra` on OpenAI's direct API. Requires `OPENAI_API_KEY`.
   - `openrouter` — `deepseek/deepseek-v4-pro-0813` via OpenRouter. Requires `OPENROUTER_API_KEY`.
 
   The model, endpoint, comment marker and blocking scope for each live in `adversarial-review.py`'s `PROVIDERS`; a caller selects a provider by name and supplies nothing else.

@@ -529,11 +529,17 @@ _ANTHROPIC_MODEL = "claude-sonnet-5-5"
 # the lateral refresh it looked like. Roughly 2x the price (5/30 vs 2/12 per M tokens,
 # measured 2026-08-30) for a job that runs weekly and blocks no merge.
 #
+# 5.6 Terra -> 6.1 Terra for infra-commons/meta#1873: a lateral same-tier refresh, $1 / $5
+# per M tokens in/out against 5.6 Terra's $2 / $12 (OpenAI catalogue, read 2026-11-07). It is a
+# reasoning model at default effort `medium`; reasoning tokens spend from the same
+# max_completion_tokens budget, and the finish_reason == "length" guard below is what keeps a
+# truncated answer from reading as an empty finding set.
+#
 # MID is the default for scans and gates — see `tier_equivalence:` in infra-commons/meta
 # model-registry.yaml and "Which tier to pin" in docs/model-freshness.md. The scan cannot
 # catch this class of mistake for you: it ranks by id_prefix, and every OpenAI model shares
 # the prefix `gpt-`, so sol/terra/luna are one tier to it.
-_OPENAI_MODEL = "gpt-5.6-terra"
+_OPENAI_MODEL = "gpt-6.1-terra"
 
 # Only alphanumeric characters and spaces survive into a system-prompt hint.
 # The suppression `reason` field is user-authored free text — injecting it

@@ -64,21 +64,21 @@ PROVIDERS = {
     "openai": {
         # MID tier (infra-commons/meta model-registry.yaml `tier_equivalence:`), which is
         # the default for gates. Terra rather than Sol on the operator's call: Sol is
-        # FLAGSHIP, roughly 2x the price (5/30 vs 2/12 per M tokens, measured 2026-08-30).
+        # FLAGSHIP. Moved 5.6 Terra -> 6.1 Terra for infra-commons/meta#1873, a lateral
+        # same-tier refresh: OpenAI's catalogue (developers.openai.com, read 2026-11-07)
+        # prices gpt-6.1-terra at $1 / $5 per M tokens in/out, against 5.6 Terra's $2 / $12.
         #
-        # NO DATED SNAPSHOT, unlike the `gpt-5.5-2026-04-23` pin this replaces. That pin
-        # existed because a floating alias can silently re-point the security reviewer
-        # underneath us. The tradeoff is now the other way: OpenAI's catalog page lists no
-        # dated snapshots at all, so a dated pin reports "absent from the current catalog"
-        # permanently and model-freshness.py can never resolve it in either direction (see
-        # its known limit 9). An unresolvable pin is the worse drift.
+        # NO DATED SNAPSHOT. OpenAI's catalogue lists none for this model either, so a dated
+        # pin would report "absent from the current catalog" permanently and
+        # model-freshness.py could never resolve it (see its known limit 9). An unresolvable
+        # pin is the worse drift.
         #
-        # REACHABILITY IS NOT YET PROVEN ON THIS SURFACE. This calls the direct OpenAI API;
-        # the fleet's only other gpt-5.6-terra pins are product-class, on Azure Foundry,
-        # which is a different deployment surface. gpt-5.6-sol IS proven here
-        # (weekly-security-scan.py). That is what the canary establishes before this
-        # reaches any caller.
-        "model": "gpt-5.6-terra",
+        # A REASONING MODEL, default effort `medium`, and nothing here sets the effort.
+        # Reasoning tokens spend from the same `max_completion_tokens` budget as the answer,
+        # which is why call_openai() raises on finish_reason == "length" instead of reading a
+        # truncated review as clean. The canary in infra-commons/security's PR for #1873
+        # records the reasoning-token count it measured against that budget.
+        "model": "gpt-6.1-terra",
         "label": "OpenAI",
         "marker": "<!-- adversarial-review-openai-bot -->",
         # The cross-family second opinion now blocks on a CRITICAL finding
@@ -107,8 +107,9 @@ PROVIDERS = {
         # dominates here, since a review sends up to MAX_DIFF_CHARS in and gets ~4k back.
         #
         # PRICE, MEASURED 2026-09-21 AND ONLY THEN: $0.66 / $1.98 per M tokens in/out, against
-        # gpt-5.6-terra's $2 / $12 — 3.0x cheaper in, 6.1x cheaper out. Re-measure before
-        # quoting: the bare `-pro` id moved 2.11x in the 24 hours before this was written.
+        # the OpenAI leg's then-pinned 5.6 Terra at $2 / $12 — 3.0x cheaper in, 6.1x cheaper
+        # out. Re-measure before quoting: the bare `-pro` id moved 2.11x in the 24 hours
+        # before this was written.
         "model": "deepseek/deepseek-v4-pro-0813",
         "label": "DeepSeek",
         # Its own marker, so its comments dedupe against themselves and stay visually distinct
