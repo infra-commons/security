@@ -80,11 +80,10 @@ jobs:
     # time. In practice it held a concurrency slot for days and kept every later
     # merge from shipping (2026-09-14→26, 2026-11-07→10).
     #
-    # Two things this does NOT give you. First, "only the operator merges" is a
-    # practice, not a repo setting: branch protection does not restrict who may
-    # merge. Second, Tests (header above) are now the only automated check
-    # between a merge and 13+ repos' merge gates. The `fleet-release`
-    # environment still exists in repo settings but nothing references it.
+    # Tests (header above) are now the only automated check between a merge and
+    # 13+ repos' merge gates, and the release is only as deliberate as the merge
+    # that triggers it. The `fleet-release` environment still exists in repo
+    # settings but nothing references it.
     permissions:
       # Corrected 2026-08-22 (reviews/2026-08-22-protect-moving-tags-ruleset-revert.md):
       # this job now mints and pushes as an App installation token, not

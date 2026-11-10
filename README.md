@@ -134,8 +134,7 @@ its `Tests` pass. Callers then repin their reusable SHA.
 own account, so that merge is the deliberate decision to ship. These tags reach 13+ repos'
 merge gates with no per-caller pin bump to review them, so `Tests` are the only automated
 check after it. The `fleet-release` environment approval that used to follow the merge asked
-for the same decision twice. Stale approvals also held the release slot for days. "Only the
-operator merges" is a practice, not a branch-protection setting.
+for the same decision twice. Stale approvals also held the release slot for days.
 
 This used to be a manual step, documented here as
 `git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`. It
