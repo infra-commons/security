@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Fail when a release run has been waiting on its approval gate for too long.
+"""Fail when the newest release run failed; name (warn on) any held release run.
+
+Since 2026-11-10
+----------------
+`release-composites.yml` no longer gates `release` on the `fleet-release`
+environment. The operator's merge is the ship decision, and green Tests after it
+release automatically. A long-held run is therefore no longer an approval
+nobody gave, so it warns instead of failing. A stale tag behind it still fails
+`check_composite_tags_released.py`. What fails here instead is a release that
+ran and failed (`evaluate_last_release`).
 
 Why this exists
 ---------------
-`release-composites.yml` gates the `release` job on the `fleet-release`
-environment, so a release waits for a human before the moving tags reach the
-fleet. That gate is correct. What it lacked was any alarm for the state
+Until 2026-11-10, a release waited on the `fleet-release` environment. What
+that lacked was any alarm for the state
 "nobody has approved for N days": a run sits in `waiting` indefinitely, `main`
 is green, the PR reads as shipped, and the only way to find out is for somebody
 to open the Actions tab and go looking.
@@ -53,6 +61,9 @@ _HELD_STATUSES = frozenset({"waiting", "queued", "pending", "action_required", "
 # A release that nobody has approved overnight is ordinary — the reviewer is
 # asleep. A day later it is not, and by then a composite fix merged behind it
 # has been unreleased for a day with every symptom reading as shipped.
+#
+# (Written under the 2026-11-10-removed approval gate. The threshold now governs
+# the WARNING; it never fails the check.)
 #
 # The threshold governs FAILING, and deliberately nothing else. It used to gate
 # reporting too, which made this check structurally unable to do the job the
@@ -120,25 +131,23 @@ def evaluate(runs, now: datetime, threshold_hours: float = DEFAULT_THRESHOLD_HOU
             )
             continue
         stuck.append(run)
+        # A warning, not an error (since 2026-11-10): with no approval gate a held
+        # run is not waiting on a human, and the tag check fails on its effect.
         messages.append(
-            f"::error::Release run {run['id']} has been `{run['status']}` for "
-            f"{held_hours:.0f}h (since {run['created_at']}). A release waiting on "
-            f"`fleet-release` moves no tags, so every composite merged behind it is "
-            f"unreleased while `main` reads as shipped. Approve or cancel it: "
+            f"::warning::Release run {run['id']} has been `{run['status']}` for "
+            f"{held_hours:.0f}h (since {run['created_at']}). With no approval gate "
+            f"this should not happen; a held release moves no tags, so check the "
+            f"runners and the concurrency group, or cancel it: "
             f"{run.get('html_url', '(no url)')}"
         )
 
     if len(stuck) + len(held_below) > 1:
-        # Approving the right run is not sufficient when an older one holds the
-        # concurrency slot: the stale run must be REJECTED first, and approving it
-        # instead releases the older tree while reporting success. Nothing on the PR
-        # page or in the run list makes this legible. Measured 2026-08-17.
+        # Measured 2026-08-17 under the old gate; the slot semantics still hold.
         messages.append(
             f"::notice::{len(stuck) + len(held_below)} release runs are held at once. "
             f"They share one concurrency group, so the OLDEST holds the slot and the "
-            f"others cannot proceed until it is resolved. Reject the stale ones rather "
-            f"than approving them — approving an old run releases the tree it was pinned "
-            f"to, not current `main`, and reports success either way."
+            f"others cannot proceed until it finishes. Each run releases main's tip "
+            f"(infra-commons/meta#1661), so cancelling the stale ones loses nothing."
         )
 
     if not stuck and not held_below:
@@ -151,6 +160,35 @@ def evaluate(runs, now: datetime, threshold_hours: float = DEFAULT_THRESHOLD_HOU
             f"but {len(held_below)} IS held and named above ({len(runs)} run(s) checked)."
         )
     return stuck, messages
+
+
+# Conclusions that mean the release job ran and did not finish its work. A
+# `cancelled` run is excluded: superseded runs are cancelled by the concurrency
+# group, and the tag check catches any effect of a cancel that mattered.
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
+
+
+def evaluate_last_release(runs):
+    """Error messages if the newest completed release run failed, else [].
+
+    Only `workflow_run` runs release; `schedule`/`workflow_dispatch` runs are
+    this heartbeat. A newer success clears an older failure, so only the newest
+    completed release run counts.
+    """
+    releases = [
+        r for r in runs if r.get("event") == "workflow_run" and r.get("status") == "completed"
+    ]
+    if not releases:
+        return []
+    newest = max(releases, key=lambda r: _parse_ts(r["created_at"]))
+    if newest.get("conclusion") not in _FAILED_CONCLUSIONS:
+        return []
+    return [
+        f"::error::The newest release run {newest['id']} concluded "
+        f"`{newest['conclusion']}` (created {newest['created_at']}). Tags may be partly "
+        f"moved, or a family was refused for a lagging inner pin (PR the pin bump). "
+        f"Read its log: {newest.get('html_url', '(no url)')}"
+    ]
 
 
 def fetch_runs(repo: str, token: str, per_page: int = 50):
@@ -191,6 +229,7 @@ def main() -> int:
         return 1
 
     stuck, messages = evaluate(runs, datetime.now(timezone.utc))
+    messages += evaluate_last_release(runs)
     for message in messages:
         print(message)
 

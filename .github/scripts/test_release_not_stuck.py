@@ -39,14 +39,19 @@ def _errors(messages):
     return [m for m in messages if m.startswith("::error::")]
 
 
+def _warnings(messages):
+    return [m for m in messages if m.startswith("::warning::")]
+
+
 # ── the failure the check exists to catch ─────────────────────────────────────
 
 
 def test_a_run_waiting_past_the_threshold_is_stuck():
     stuck, messages = check.evaluate([_run(1, "waiting", 30)], NOW)
     assert [r["id"] for r in stuck] == [1]
-    assert _errors(messages), "a run held 30h must produce an error, not a warning"
-    assert "30h" in messages[0]
+    # Since the approval gate went (2026-11-10): named as a warning, never a failure.
+    assert not _errors(messages), "a held run must warn, not fail, now there is no gate"
+    assert _warnings(messages) and "30h" in messages[0]
 
 
 def test_a_run_queued_behind_the_group_past_the_threshold_is_stuck():
@@ -69,7 +74,7 @@ def test_every_stuck_run_is_reported_not_just_the_first():
         [_run(10, "waiting", 30), _run(11, "queued", 40)], NOW
     )
     assert sorted(r["id"] for r in stuck) == [10, 11]
-    assert len(_errors(messages)) == 2
+    assert len(_warnings(messages)) == 2
 
 
 # ── states that must NOT trip it ──────────────────────────────────────────────
@@ -131,12 +136,11 @@ def test_the_2026_08_07_incident_is_caught():
     stuck, messages = check.evaluate(runs, incident_now)
 
     assert [r["id"] for r in stuck] == [31058866599]
-    assert _errors(messages)
+    assert _warnings(messages) and not _errors(messages)
     # The message has to name the run and tell the reader what to do with it,
     # or it is an alarm nobody can act on.
     assert "31058866599" in messages[0]
-    assert "fleet-release" in messages[0]
-    assert "Approve or cancel" in messages[0]
+    assert "cancel it" in messages[0]
 
 
 def test_the_incident_would_not_have_fired_on_its_first_night():
@@ -198,16 +202,47 @@ def test_a_genuinely_clear_list_still_reads_clean():
 
 
 def test_two_held_runs_warn_that_the_oldest_holds_the_slot():
-    """Approving the right run is not sufficient — measured 2026-08-17. The stale run
-    had to be REJECTED first, and approving it would have released the older tree while
-    reporting success. Nothing else in the tooling says this."""
+    """Measured 2026-08-17: the oldest held run blocks the rest. Every run releases
+    main's tip (meta#1661), so the advice is to cancel the stale ones."""
     _, messages = check.evaluate([_run(13, "waiting", 15), _run(14, "queued", 2)], NOW)
     text = " ".join(_notices(messages))
     assert "OLDEST holds the slot" in text
-    assert "Reject" in text
+    assert "cancelling the stale ones" in text
 
 
 def test_one_held_run_does_not_emit_the_concurrency_warning():
     """It only applies when runs are actually contending; otherwise it is noise."""
     _, messages = check.evaluate([_run(15, "waiting", 15)], NOW)
     assert "OLDEST holds the slot" not in " ".join(_notices(messages))
+
+
+# ── a failed release is the failure that remains (since 2026-11-10) ──────────
+
+
+def _rel(run_id, conclusion, age_hours, event="workflow_run"):
+    return _run(run_id, "completed", age_hours, conclusion=conclusion, event=event)
+
+
+def test_the_newest_release_failing_is_an_error():
+    errors = check.evaluate_last_release([_rel(20, "failure", 2), _rel(19, "success", 30)])
+    assert len(errors) == 1 and errors[0].startswith("::error::") and "20" in errors[0]
+
+
+def test_a_newer_success_clears_an_older_failure():
+    assert check.evaluate_last_release([_rel(21, "success", 2), _rel(20, "failure", 30)]) == []
+
+
+def test_a_cancelled_newest_release_is_not_a_failure():
+    """Superseded runs are cancelled by the concurrency group; the tag check judges effect."""
+    assert check.evaluate_last_release([_rel(22, "cancelled", 2), _rel(21, "success", 30)]) == []
+
+
+def test_heartbeat_runs_are_not_releases():
+    """A red nightly verify must not read as a failed release, or it would latch itself."""
+    runs = [_rel(23, "failure", 1, event="schedule"), _rel(21, "success", 30)]
+    assert check.evaluate_last_release(runs) == []
+
+
+def test_an_in_flight_release_defers_to_the_last_completed_one():
+    runs = [_run(24, "in_progress", 0.1, event="workflow_run"), _rel(20, "timed_out", 30)]
+    assert check.evaluate_last_release(runs)

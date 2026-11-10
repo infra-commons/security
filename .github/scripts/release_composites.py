@@ -155,7 +155,7 @@ def main() -> int:
     trigger = os.environ.get("TRIGGER_SHA", "")
     if trigger and trigger != head:
         # The run that fired this one tested an older commit; main has moved
-        # since (usually a run left waiting on `fleet-release` while more merged).
+        # since (another merge landed while this run was queued behind the group).
         # Release the tip instead, but only on the strength of the tip's OWN
         # green Tests run: the triggering run's success says nothing about it.
         print(

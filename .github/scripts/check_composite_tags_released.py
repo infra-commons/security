@@ -307,9 +307,9 @@ def dispatch_cannot_release_notice(event_name: str) -> str | None:
     return (
         "::notice::This run was started by `workflow_dispatch`, which CANNOT release: the "
         "`release` job only runs on `workflow_run`. The failure above means the tags are "
-        "still stale, NOT that a release attempt failed. To actually release, approve the "
-        "pending `release-composites` run on the `fleet-release` environment (or push to "
-        "`main` to create one) — re-dispatching this workflow only repeats this report."
+        "still stale, NOT that a release attempt failed. A push to `main` whose Tests pass "
+        "releases automatically; if one already did, read that `release-composites` "
+        "run's log — re-dispatching this workflow only repeats this report."
     )
 
 

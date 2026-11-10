@@ -72,29 +72,18 @@ jobs:
           && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # The human gate, and the only one on this path. Automating the release
-    # removed the step that was being forgotten, but it also removed the last
-    # deliberate act between an edit here and 13+ repos' merge gates: the moving
-    # tags are consumed by production callers with no per-caller pin bump to
-    # review, and `protect-moving-tags` restricts `update` to the App only.
-    # Tests passing is a statement about this repo; it is not a decision to
-    # ship to the fleet. This environment makes someone take that decision, at
-    # the moment the fleet is actually reached.
+    # No approval step, on purpose (since 2026-11-10). Merges to `main` here are
+    # made from the operator's own GitHub account; the automation account opens
+    # PRs but does not merge them. That merge is the deliberate decision to ship
+    # to the fleet, so green Tests after it IS the release. The old
+    # `fleet-release` environment approval asked for the same decision a second
+    # time. In practice it held a concurrency slot for days and kept every later
+    # merge from shipping (2026-09-14→26, 2026-11-07→10).
     #
-    # It must exist with its `required_reviewers` rule BEFORE this line merges: a
-    # workflow naming an environment that does not exist gets one auto-created
-    # with no protection rules, which reads exactly like a gate and is none.
-    # Created 2026-08-01. The reviewer list lives in the environment's settings
-    # and is deliberately not repeated here — a copy in a comment is a second
-    # source that can silently disagree with the one being enforced.
-    #
-    # `prevent_self_review` is deliberately OFF. Only two identities have access
-    # here, and the automation account authors and merges most changes; with
-    # self-review prevented, a release triggered by the reviewer's own merge
-    # would be unsatisfiable — the same unsatisfiable-approval deadlock this
-    # repo's `required_reviews: 1` already suffers from. The property wanted is
-    # that a human deliberately releases, not that a second person does.
-    environment: fleet-release
+    # Tests (header above) are now the only automated check between a merge and
+    # 13+ repos' merge gates, and the release is only as deliberate as the merge
+    # that triggers it. The `fleet-release` environment still exists in repo
+    # settings but nothing references it.
     permissions:
       # Corrected 2026-08-22 (reviews/2026-08-22-protect-moving-tags-ruleset-revert.md):
       # this job now mints and pushes as an App installation token, not
@@ -198,7 +187,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      # Reading this workflow's own run list, for the stuck-approval check below.
+      # Reading this workflow's own run list, for the release-outcome check below.
       actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -214,16 +203,17 @@ jobs:
       - name: Check every composite is released
         run: python .github/scripts/check_composite_tags_released.py
 
-      - name: Check no release is stuck awaiting approval
-        # The step above proves the tags landed. This proves nothing is silently
-        # queued behind a human who did not notice they were being asked: a run
-        # left `waiting` on `fleet-release` reports nowhere, and every composite
-        # merged behind it stays unreleased while `main` reads as shipped.
+      - name: Check the last release did not fail
+        # The step above proves the tags landed. This one fails if the newest
+        # release run failed. A failed release can leave tags half-moved, or
+        # leave a family refused for a lagging inner pin. Held or queued runs are
+        # named as warnings, not failures. With no approval gate, a held run is
+        # transient, and a stale tag behind one still fails the step above.
         #
-        # `if: always()` because a stale tag and a stuck approval are usually the
-        # same incident, and the stuck approval is the *explanation*. Skipping it
-        # when the check above fails would withhold the diagnosis exactly when it
-        # is needed.
+        # `if: always()` because a stale tag and a failed or held release are
+        # usually the same incident, and this step names the *cause*. Skipping
+        # it when the check above fails would withhold the diagnosis exactly
+        # when it is needed.
         if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
