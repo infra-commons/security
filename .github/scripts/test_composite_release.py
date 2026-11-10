@@ -406,7 +406,7 @@ def test_a_manual_dispatch_failure_says_it_could_not_have_released():
     assert notice and notice.startswith("::notice::")
     assert "CANNOT release" in notice
     # It must also say what to do instead, or it just relabels the dead end.
-    assert "fleet-release" in notice
+    assert "push to `main`" in notice
 
 
 def test_the_notice_does_not_fire_on_the_triggers_that_can_release():

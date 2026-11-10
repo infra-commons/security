@@ -127,15 +127,15 @@ also what keeps `suppression-audit` discoverable). `<family>/v1` tags still move
 reusable plus the composite SHA it pins. **To ship a composite fix:** merge it (M1). Its
 release run refuses each family whose reusable pins an older composite (`lagging_inner_pins`),
 releases the rest and exits 1. PR the pin bump to M1: the comment names the matching release,
-or `# main@<sha7> (security#N)` if none is cut yet. Merge it, then approve the `fleet-release`
-run, which waits in *Waiting* for a reviewer. Callers then repin their reusable SHA.
+or `# main@<sha7> (security#N)` if none is cut yet. Merge it; the release runs as soon as
+its `Tests` pass. Callers then repin their reusable SHA.
 
-The approval is the only deliberate act left on this path, which is why it exists. These
-tags reach 13+ repos' merge gates with no per-caller pin bump to review them, and
-`protect-moving-tags` keeps only its `deletion` rule, so nothing else stands between an
-edit here and the fleet. `Tests` passing is a statement about this repo; it is not a
-decision to ship to everyone consuming it. Automating the tag move removed a step that was
-being forgotten — it should not also remove the step that was being *decided*.
+**The merge is the release** (since 2026-11-10). Merges here are made from the operator's
+own account, so that merge is the deliberate decision to ship. These tags reach 13+ repos'
+merge gates with no per-caller pin bump to review them, so `Tests` are the only automated
+check after it. The `fleet-release` environment approval that used to follow the merge asked
+for the same decision twice. Stale approvals also held the release slot for days. "Only the
+operator merges" is a practice, not a branch-protection setting.
 
 This used to be a manual step, documented here as
 `git tag -f capture-findings/v1 <new-sha> && git push -f origin capture-findings/v1`. It
@@ -151,7 +151,7 @@ Two mechanisms now hold the property, deliberately separate:
 
 | | What it does | When |
 |---|---|---|
-| `release-composites.yml` (`release` job) | moves the tags | after `Tests` passes on `main`, **and** a `fleet-release` reviewer approves |
+| `release-composites.yml` (`release` job) | moves the tags | after `Tests` passes on a push to `main` (no approval step) |
 | `check_composite_tags_released.py` (`verify` job) | asserts every `<family>/vN` tag's action directory is byte-identical to `main`'s | after each release, plus daily and on demand |
 
 The verifier is not decoration. A release mechanism reporting its own success is the
@@ -160,11 +160,9 @@ content. It also runs on a schedule, so if the release chain breaks (`Tests` ren
 disabled, or no longer running on `main`) that is caught within a day rather than
 presenting as the same silence as everything working.
 
-Note the one overlap with the approval gate: while a release is waiting to be approved the
-tags genuinely do not match `main`, so a scheduled `verify` run in that window fails, and
-it is right to. It means "a release is outstanding", not "the release mechanism is broken"
-— the two are distinguishable by whether a run of `release-composites.yml` is sitting in
-*Waiting*. Approving it clears the failure.
+`verify` also fails when the newest release run failed (`check_release_not_stuck.py`).
+A held or queued release run is named as a warning, not a failure. With no approval gate it
+should be minutes old at most, and if it holds a tag back, the tag check fails anyway.
 
 **Tags are never moved before merge.** The release runs on `push` to `main`, so the commit
 a tag lands on is always merged. Repointing a moving tag at a pre-merge commit is a
