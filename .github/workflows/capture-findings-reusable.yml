@@ -195,7 +195,7 @@ jobs:
       # SHA-pinned (infra-commons/meta#1779): a capture.py fix ships by bumping this SHA in a
       # PR, and the release refuses this family until it is bumped, so #20/#21's silent
       # stale-inner-pin cannot recur. See README "Reusables' internal composite pins".
-      - uses: infra-commons/security/.github/actions/capture-findings@15e5a944f138c3028ffe0c75048718b6e3865560 # capture-findings/v1 (v1.20.0)
+      - uses: infra-commons/security/.github/actions/capture-findings@61934fdbf7ebd61fdc280491526b01cbcd000e61 # main@61934fd (security#202)
         with:
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           github-token: ${{ github.token }}
