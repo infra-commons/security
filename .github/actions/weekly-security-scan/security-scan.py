@@ -269,9 +269,9 @@ _APP_FILES: list[str | list[str]] = [
     # API layer (highest attack surface)
     ["src/api/main.py"],
     ["src/api/routes"],          # directory — all files
-    # LLM gateway
-    ["src/llm/client.py"],
-    ["src/llm/providers"],
+    # LLM gateway — the whole directory, so every module under src/llm/ is
+    # reviewed (client.py, providers/, classify_call.py, spend_guard.py, ...)
+    ["src/llm"],
     # Config / secrets handling
     ["src/config.py"],
     # Storage layer
