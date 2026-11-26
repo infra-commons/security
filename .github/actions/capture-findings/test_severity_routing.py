@@ -255,14 +255,14 @@ def test_digest_row_round_trips_for_every_severity(severity):
     clamp holds — which is precisely why it needs a test rather than a comment."""
     finding = _finding(severity, "src/app.py:12", "Something")
     body = capture.build_digest_body([capture.digest_row(finding)], "https://example.invalid/run")
-    assert capture.existing_digest_locations(body) == {"src/app.py:12"}
+    assert capture.existing_digest_keys(body) == {(severity, "src/app.py:12")}
 
 
 def test_a_digest_row_is_not_re_added_on_the_next_run():
     """The dedup property the round-trip exists to protect."""
     finding = _finding("MEDIUM", "src/app.py:12", "Something")
     body = capture.build_digest_body([capture.digest_row(finding)], "https://example.invalid/run")
-    assert finding["location"] in capture.existing_digest_locations(body)
+    assert ("MEDIUM", finding["location"]) in capture.existing_digest_keys(body)
 
 
 # ── Caller compatibility: the input must stay declared ───────────────────────────
