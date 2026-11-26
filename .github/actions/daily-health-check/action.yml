@@ -10,11 +10,12 @@ inputs:
     required: true
   approve-token:
     description: >-
-      Token used ONLY to approve eligible Dependabot PRs. GitHub forbids the
-      default GITHUB_TOKEN from approving PRs, so pass a GitHub App installation
-      token (an identity distinct from the PR author) here. Optional — if empty,
-      the approve falls back to github-token and fails soft (the PR waits for a
-      human), preserving prior behaviour.
+      Token used to approve eligible Dependabot PRs AND to enable their
+      auto-merge, so the App (not github-actions[bot]) is the actor that moves
+      the base branch. GitHub forbids the default GITHUB_TOKEN from approving
+      PRs, so pass a GitHub App installation token (an identity distinct from
+      the PR author) here. Optional — if empty, both calls fall back to
+      github-token and the approve fails soft (the PR waits for a human).
     required: false
     default: ""
   anthropic-api-key:

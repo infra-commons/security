@@ -1488,7 +1488,11 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
     # The approve must run as a distinct identity — the Actions GITHUB_TOKEN is
     # forbidden from approving PRs. None when no approver App is wired (approve
     # then uses the default token and fails soft, as before). Enabling auto-merge
-    # below stays on the default token — only the approve needs the App.
+    # runs as the App too: whoever arms or performs the merge is the actor GitHub
+    # records as moving main, and a restrict-updates ruleset can name the App as
+    # its bypass actor but must not have to name github-actions[bot] (which every
+    # workflow in the repo holds). On the default token, every Dependabot merge in
+    # this lane landed as github-actions[bot] (security#75).
     approve_env = _approver_env()
     if approve_env is None and prs:
         print("  NOTE: no approver App token (APPROVE_TOKEN unset) — approvals "
@@ -1551,7 +1555,8 @@ def triage_dependabot_prs(repo: str, health_run_url: str, dry_run: bool) -> dict
             continue
 
         try:
-            _gh("pr", "merge", str(number), "--repo", repo, "--auto", "--squash")
+            _gh("pr", "merge", str(number), "--repo", repo, "--auto", "--squash",
+                env=approve_env)
             print("    → auto-merge enabled")
         except subprocess.CalledProcessError as exc:
             print(f"    → auto-merge unavailable ({exc.stderr.strip()[:60]}); "
