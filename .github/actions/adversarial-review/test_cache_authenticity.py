@@ -28,7 +28,7 @@ _spec.loader.exec_module(adv)
 MARKER = "<!-- adversarial-review-bot -->"
 OTHER_MARKER = "<!-- adversarial-review-openai-bot -->"
 SECRET = "sk-test-review-api-key"
-ARGS = ("anthropic", "claude-sonnet-4-6", "system prompt", "diff --git a/x b/x\n+1\n")
+ARGS = ("anthropic", "claude-sonnet-4-6", "system prompt", "diff-id-1", "repo context", "reviewer-src-1")
 
 TRUSTED = adv.TRUSTED_COMMENT_AUTHOR
 
@@ -69,7 +69,7 @@ def test_wrong_key_with_trusted_author_is_still_a_miss():
     """Authorship alone is not sufficient either: a trusted comment for a
     different diff/prompt/model must not be read as covering this one."""
     stored = key(*ARGS)
-    wanted = key("anthropic", "claude-sonnet-4-6", "system prompt", "a different diff")
+    wanted = key("anthropic", "claude-sonnet-4-6", "system prompt", "a different diff", "repo context", "reviewer-src-1")
     assert adv.find_cached_verdict([comment(MARKER, stored)], MARKER, wanted, SECRET) is None
 
 
