@@ -169,7 +169,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@e9c6395e3e9e6e2d5a4b0bb57f6b31b329926230 # main@e9c6395 (security#195)
+        uses: infra-commons/security/.github/actions/adversarial-review@2f882037d0b05990dcd9bc26101fbf56e6ee5ae8 # main@2f88203 (security#203)
         with:
           provider: anthropic
           api-key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -203,7 +203,7 @@ jobs:
       outcome: ${{ steps.review.outputs.outcome }}
     steps:
       - id: review
-        uses: infra-commons/security/.github/actions/adversarial-review@e9c6395e3e9e6e2d5a4b0bb57f6b31b329926230 # main@e9c6395 (security#195)
+        uses: infra-commons/security/.github/actions/adversarial-review@2f882037d0b05990dcd9bc26101fbf56e6ee5ae8 # main@2f88203 (security#203)
         with:
           provider: ${{ inputs.second-opinion-provider }}
           # THE SECOND ARM IS A FULL CONDITION, NOT A BARE FALLBACK, and that is the whole
@@ -324,19 +324,17 @@ jobs:
       # nothing in this repo goes red — the gate family is in no release set and no
       # verify set, so there is no check to fail.
       #
-      # This bump (2026-09-30) is a no-op for the gate's RUNTIME: between 2b68d5ed
-      # (v1.16.0) and 6a000009 (v1.19.0), `action.yml` and `gate.py` are
-      # byte-identical. The directory is NOT: `test_gate_wiring.py` gained the
-      # meta#1656 state-bearing-recorder test (#167), which asserts on THIS file and
-      # is never executed by the action. Do not carry this sentence forward
-      # unverified — re-derive it per bump. The v1.19.0 payload lands in the
-      # reviewer composite: #165 (the `openrouter` second-opinion provider, which
-      # this file has passed through since #165 but v1.16.0 rejected as an unknown
-      # PROVIDER), #167 (docs) and #168 (the gate model claude-sonnet-5 ->
-      # claude-sonnet-5-5, and `stop_reason == "refusal"` now fails the review).
+      # This bump (e9c6395 -> 2f88203, 2026-11-26) is a no-op for the gate: the whole
+      # `.github/actions/adversarial-review-gate` directory is byte-identical between
+      # the two commits (`git diff --stat e9c6395 2f88203 -- <dir>` is empty). It moves
+      # with the reviewer pins only so one release stays one SHA in this file. The
+      # payload is in the reviewer composite: #203 (the review-cache key now covers
+      # the untruncated raw change, the repo context and the reviewer's own source,
+      # so a cache hit always means this exact change was reviewed under these exact
+      # rules). Do not carry this sentence forward unverified — re-derive it per bump.
       - name: Evaluate findings
         id: evaluate
-        uses: infra-commons/security/.github/actions/adversarial-review-gate@e9c6395e3e9e6e2d5a4b0bb57f6b31b329926230 # = main@e9c6395 (security#195)
+        uses: infra-commons/security/.github/actions/adversarial-review-gate@2f882037d0b05990dcd9bc26101fbf56e6ee5ae8 # = main@2f88203 (security#203)
         with:
           claude-result: ${{ needs.claude.result }}
           claude-has-critical: ${{ needs.claude.outputs.has_critical }}
