@@ -965,6 +965,25 @@ def update_issue_body(token: str, repo: str, number: int, body: str) -> None:
         ).raise_for_status()
 
 
+def add_labels(token: str, repo: str, number: int, labels: list[str]) -> None:
+    """Additive: labels already on the issue are kept."""
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        client.post(
+            f"{GITHUB_API}/repos/{repo}/issues/{number}/labels",
+            headers=_headers(token),
+            json={"labels": labels},
+        ).raise_for_status()
+
+
+def comment_on_issue(token: str, repo: str, number: int, body: str) -> None:
+    with httpx.Client(timeout=_TIMEOUT) as client:
+        client.post(
+            f"{GITHUB_API}/repos/{repo}/issues/{number}/comments",
+            headers=_headers(token),
+            json={"body": body[:65_000]},
+        ).raise_for_status()
+
+
 # ── PR-time review ingest ──────────────────────────────────────────────────────
 #
 # The PR-time adversarial-review gate runs TWO reviewers (Anthropic + OpenAI), each
@@ -1791,18 +1810,22 @@ def severity_floor_note(floor: str) -> str | None:
 # the same way weekly-security-scan matches its aggregate issue by title).
 DIGEST_TITLE = "[Security][adversarial-ai] MEDIUM/LOW findings digest"
 
-# Recover the location cell from an existing digest table row, for append-dedup.
+# Recover the (severity, location) key from an existing digest table row, for append-dedup.
 # Locations are sanitised (backticks/pipes escaped) before they reach a row, so
 # the only backticks on the line are the wrappers this module adds.
 #
+# The key includes severity (security#92 item 4): keyed on location alone, a MEDIUM at a
+# location already listed as LOW was dropped as a duplicate. Severity, not title — titles
+# are model-written and unstable, so keying on them would re-append on every run.
+#
 # Derived from _SEVERITY_ORDER rather than spelled "MEDIUM|LOW", because digest_row()
 # below writes whatever severity it is handed. The two were allowed to disagree: a
-# severity this pattern cannot read back is a location that never enters `seen`, so every
+# severity this pattern cannot read back is a key that never enters `seen`, so every
 # subsequent run re-appends the same row and the digest grows without bound. The clamp
 # above makes that unreachable today — which is exactly why the coupling needs to be
 # structural rather than a comment nobody will re-check.
 _DIGEST_ROW_RE = re.compile(
-    r'(?m)^\|\s*(?:' + "|".join(_SEVERITY_ORDER) + r')\s*\|\s*`([^`]+)`\s*\|'
+    r'(?m)^\|\s*(' + "|".join(_SEVERITY_ORDER) + r')\s*\|\s*`([^`]+)`\s*\|'
 )
 
 
@@ -1813,8 +1836,8 @@ def digest_row(finding: dict) -> str:
     )
 
 
-def existing_digest_locations(body: str) -> set[str]:
-    """Locations already listed in a digest issue body."""
+def existing_digest_keys(body: str) -> set[tuple[str, str]]:
+    """(severity, location) pairs already listed in a digest issue body."""
     return set(_DIGEST_ROW_RE.findall(body or ""))
 
 
@@ -1831,7 +1854,21 @@ def existing_digest_rows(body: str) -> list[str]:
     return rows
 
 
-def build_digest_body(rows: list[str], run_url: str) -> str:
+# A digest closed not-planned/wont-fix used to make upsert_digest() return early, so one
+# ordinary human close dropped every later MEDIUM/LOW finding in that repo with exit 0
+# (security#92). It now starts a fresh digest, exactly as a digest closed *completed*
+# always has: the close ends that batch, not capture. Reopening would overrule the close on
+# every merge; failing the run would still lose the findings. The per-finding opt-out is
+# the suppressions file, not closing the digest.
+_DIGEST_RESTART_NOTE = (
+    "A previous MEDIUM/LOW digest in this repo was closed as not planned (or labelled "
+    "`wont-fix`), so this is a fresh digest. Closing a digest ends that batch; it does not "
+    "stop capture. To silence a specific finding, add a "
+    "`.github/adversarial-review-suppressions.yml` entry."
+)
+
+
+def build_digest_body(rows: list[str], run_url: str, note: str = "") -> str:
     return "\n".join([
         "## MEDIUM / LOW security findings (rolling digest)",
         "",
@@ -1841,6 +1878,7 @@ def build_digest_body(rows: list[str], run_url: str) -> str:
         "add a `.github/adversarial-review-suppressions.yml` entry if it is a false "
         "positive.",
         "",
+        *([f"> {note}", ""] if note else []),
         "| Severity | Location | Finding | Captured |",
         "| --- | --- | --- | --- |",
         *rows,
@@ -1849,6 +1887,13 @@ def build_digest_body(rows: list[str], run_url: str) -> str:
         f"_Rolling digest maintained by the [capture-findings workflow]({run_url}). "
         f"Last updated {datetime.now(timezone.utc).strftime('%Y-%m-%d')}._",
     ])
+
+
+def _severity_labels(findings: list[dict]) -> list[str]:
+    """`severity:*` labels for the severities present, so label-counting consumers see the
+    digest (security#92 item 2). The status dashboard takes the highest one."""
+    return [f"severity:{s.lower()}" for s in _SEVERITY_ORDER
+            if any(f["severity"] == s for f in findings)]
 
 
 def upsert_digest(
@@ -1864,39 +1909,64 @@ def upsert_digest(
     """Create or update the rolling MEDIUM/LOW digest.
 
     Returns (issues_created, rows_added). New rows are appended to the existing
-    digest, deduplicated by location so re-merging the same code does not
+    digest, deduplicated by (severity, location) so re-merging the same code does not
     double-list a finding. A newly CREATED digest is boarded at Inbox
     (infra-commons/meta#1656); the board-add runs after the create and cannot undo it.
+    An append also adds any new severity labels and posts a comment, because a body
+    edit notifies nobody (security#92 item 3).
     """
     existing_issue = open_issues.get(DIGEST_TITLE)
-    if existing_issue is None and DIGEST_TITLE in suppressed_closed:
-        print("  Digest issue is closed as not-planned/wont-fix — not re-creating.")
-        return 0, 0
+    restarted = existing_issue is None and DIGEST_TITLE in suppressed_closed
 
     prior_body = (existing_issue or {}).get("body") or ""
-    seen = existing_digest_locations(prior_body)
+    seen = existing_digest_keys(prior_body)
     prior_rows = existing_digest_rows(prior_body)
 
-    added_rows: list[str] = []
+    added: list[dict] = []
     for finding in new_findings:
-        if finding["location"] in seen:
-            print(f"  Digest already lists: {finding['location']}")
+        key = (finding["severity"], finding["location"])
+        if key in seen:
+            print(f"  Digest already lists: [{key[0]}] {key[1]}")
             continue
-        seen.add(finding["location"])
-        added_rows.append(digest_row(finding))
+        seen.add(key)
+        added.append(finding)
         print(f"  Digesting [{finding['severity']}] {finding['location']}")
 
-    if not added_rows:
+    if not added:
         print("  No new MEDIUM/LOW findings for the digest.")
         return 0, 0
 
-    body = build_digest_body(prior_rows + added_rows, run_url)
+    added_rows = [digest_row(f) for f in added]
+    labels = _severity_labels(added)
     if existing_issue:
-        update_issue_body(token, repo, existing_issue["number"], body)
-        print(f"  Updated digest issue #{existing_issue['number']} (+{len(added_rows)} finding(s))")
+        number = existing_issue["number"]
+        update_issue_body(token, repo, number, build_digest_body(prior_rows + added_rows, run_url))
+        print(f"  Updated digest issue #{number} (+{len(added_rows)} finding(s))")
+        # Both ride on top of a capture that has already landed in the body: a failure is
+        # a warning, never a reason to sink the run.
+        try:
+            add_labels(token, repo, number, labels)
+            comment_on_issue(token, repo, number, "\n".join([
+                f"Added {len(added_rows)} finding(s) to this digest:",
+                "",
+                "| Severity | Location | Finding | Captured |",
+                "| --- | --- | --- | --- |",
+                *added_rows,
+                "",
+                f"_[capture-findings run]({run_url})_",
+            ]))
+        except Exception as exc:  # noqa: BLE001
+            print(f"::warning::digest #{number} updated, but labelling/notifying it failed: {exc}")
         return 0, len(added_rows)
 
-    created_issue = create_issue(token, repo, DIGEST_TITLE, body, ["security", "source:adversarial-ai"])
+    if restarted:
+        msg = ("previous MEDIUM/LOW digest was closed not-planned/wont-fix; "
+               "starting a fresh digest instead of dropping these findings")
+        print(f"::warning::{msg}")
+        _step_summary(f"> **Warning:** {msg}.\n")
+    body = build_digest_body(added_rows, run_url, _DIGEST_RESTART_NOTE if restarted else "")
+    created_issue = create_issue(token, repo, DIGEST_TITLE, body,
+                                 ["security", "source:adversarial-ai", *labels])
     print(f"  Created digest issue with {len(added_rows)} finding(s)")
     node_id = (created_issue or {}).get("node_id", "")
     report_board(*board_issue(board_token, board_owner, node_id=node_id), "the digest issue")

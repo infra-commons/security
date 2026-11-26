@@ -304,6 +304,8 @@ def test_an_updated_digest_is_not_re_boarded(monkeypatch):
         raise AssertionError("appending a row to an open digest files nothing new to board")
     monkeypatch.setattr(capture, "update_issue_body", lambda *a: None)
     monkeypatch.setattr(capture, "board_issue", fail)
+    monkeypatch.setattr(capture, "add_labels", lambda *a: None)
+    monkeypatch.setattr(capture, "comment_on_issue", lambda *a: None)
     existing = {capture.DIGEST_TITLE: {"number": 5, "body": ""}}
     assert capture.upsert_digest("t", "o/r", existing, set(), [_digest_finding()], "run",
                                  board_token="app", board_owner="o") == (0, 1)
