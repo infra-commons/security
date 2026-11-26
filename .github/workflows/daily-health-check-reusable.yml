@@ -133,12 +133,14 @@ jobs:
           app-id:      ${{ secrets.approve_app_id }}
           private-key: ${{ secrets.approve_app_private_key }}
 
-      - uses: infra-commons/security/.github/actions/daily-health-check@15e5a944f138c3028ffe0c75048718b6e3865560 # daily-health-check/v1 (v1.10.0)
+      - uses: infra-commons/security/.github/actions/daily-health-check@2f882037d0b05990dcd9bc26101fbf56e6ee5ae8 # main @ 2f88203 (carries the App-token merge)
         with:
           github-token:      ${{ github.token }}
-          # Used ONLY to approve Dependabot PRs (github.token cannot). Empty when
-          # no App is wired → approve fails soft. Everything else — re-runs,
-          # issue filing, enabling auto-merge — stays on github.token above.
+          # Used to approve Dependabot PRs (github.token cannot) AND to enable
+          # their auto-merge, so the merge lands as the App rather than as
+          # github-actions[bot]. Empty when no App is wired → both fall back to
+          # github.token and the approve fails soft. Re-runs and issue filing
+          # stay on github.token above.
           approve-token:     ${{ steps.approver.outputs.token }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           repo:              ${{ github.repository }}
