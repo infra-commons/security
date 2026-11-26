@@ -920,7 +920,8 @@ def test_total_skip_warning_silent_on_an_empty_queue():
 def dependabot_harness(monkeypatch):
     """Drive triage_dependabot_prs against a canned PR list + per-PR gh calls,
     recording which PRs actually got approved/merged."""
-    state = {"prs": [], "pr_data": {}, "approved": [], "merged": []}
+    state = {"prs": [], "pr_data": {}, "approved": [], "merged": [],
+             "review_envs": [], "merge_envs": []}
 
     def fake_gh_json(*args):
         if args[:2] == ("pr", "list"):
@@ -934,9 +935,11 @@ def dependabot_harness(monkeypatch):
             return json.dumps(data)
         if args[:2] == ("pr", "review"):
             state["approved"].append(int(args[2]))
+            state["review_envs"].append(kwargs.get("env"))
             return ""
         if args[:2] == ("pr", "merge"):
             state["merged"].append(int(args[2]))
+            state["merge_envs"].append(kwargs.get("env"))
             return ""
         return ""
 
@@ -1021,6 +1024,37 @@ def test_a_clean_minor_bump_is_still_approved_and_auto_merged(dependabot_harness
     assert dependabot_harness["approved"] == [10]
     assert dependabot_harness["merged"] == [10]
     assert result["approved"] == 1
+
+
+def _clean_bump(harness):
+    harness["prs"] = [{"number": 10, "title": "bump foo from 1.0.0 to 1.0.1", "url": "u"}]
+    harness["pr_data"][10] = {
+        "files": [{"path": "requirements.txt"}],
+        "statusCheckRollup": _rollup("SUCCESS", "SUCCESS"),
+    }
+
+
+def test_the_merge_runs_as_the_approver_app_not_the_default_token(
+        dependabot_harness, monkeypatch):
+    """Regression for security#75: the approve ran as the App but the merge ran
+    on GITHUB_TOKEN, so it landed as github-actions[bot]. A restrict-updates
+    ruleset that names the App as bypass actor would then block this lane."""
+    app_env = {"GH_TOKEN": "app-installation-token"}
+    monkeypatch.setattr(hc, "_approver_env", lambda: app_env)
+    _clean_bump(dependabot_harness)
+
+    hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["review_envs"] == [app_env]
+    assert dependabot_harness["merge_envs"] == [app_env]
+
+
+def test_with_no_app_wired_the_merge_keeps_the_default_token(dependabot_harness):
+    _clean_bump(dependabot_harness)
+
+    hc.triage_dependabot_prs("o/r", "u", dry_run=False)
+
+    assert dependabot_harness["merge_envs"] == [None]
 
 
 def test_dry_run_still_reports_what_it_would_skip(dependabot_harness):
